@@ -1,0 +1,6 @@
+pyrogram==2.0.106
+TgCrypto==1.2.5
+aiosqlite==0.20.0
+pydantic-settings==2.3.4
+apscheduler==3.10.4
+aiohttp==3.13.5
