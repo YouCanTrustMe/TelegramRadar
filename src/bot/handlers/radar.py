@@ -68,7 +68,7 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
         alert_lines = ""
         if alerts:
             alert_lines = "\n\n<b>Last alerts:</b>\n" + "\n".join(
-                f"• \"{r['keyword']}\" in {r['chat_ref']} — {r['alerted_at'][:16]}"
+                f"• \"{escape(r['keyword'])}\" in {escape(r['chat_ref'])} — {r['alerted_at'][:16]}"
                 for r in alerts
             )
 

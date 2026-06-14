@@ -62,7 +62,7 @@ async def _schema_has_migration(db, migration) -> bool:
         if m:
             table, col = m.group(1).lower(), m.group(2).lower()
             async with db.execute(
-                f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?", (col,)
+                "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?", (table, col)
             ) as cur:
                 if (await cur.fetchone())[0] == 0:
                     return False
