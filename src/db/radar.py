@@ -172,26 +172,6 @@ async def get_keyword_ids_for_chat(chat_id: int) -> set[int]:
             return {r["keyword_id"] for r in rows}
 
 
-async def count_links_for_keyword(keyword_id: int) -> int:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT COUNT(*) AS n FROM radar_keyword_chats WHERE keyword_id = ?",
-            (keyword_id,),
-        ) as cur:
-            row = await cur.fetchone()
-            return int(row["n"]) if row else 0
-
-
-async def count_links_for_chat(chat_id: int) -> int:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT COUNT(*) AS n FROM radar_keyword_chats WHERE chat_id = ?",
-            (chat_id,),
-        ) as cur:
-            row = await cur.fetchone()
-            return int(row["n"]) if row else 0
-
-
 async def get_silent_radar_chats(threshold_hours: int = 120) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
