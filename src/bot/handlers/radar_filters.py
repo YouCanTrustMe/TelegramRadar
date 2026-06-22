@@ -14,6 +14,7 @@ from src.collectors.userbot import userbot
 from src.db.radar import (
     add_sender_rule,
     allow_only_sender_in_chat,
+    clear_sender_rules,
     get_author_label,
     get_keyword_chat_modes,
     get_keyword_ids_for_chat,
@@ -31,6 +32,7 @@ log = logging.getLogger(__name__)
 
 _MUTED_VIEW_LIMIT = 20
 _RECENT_SENDERS_LIMIT = 10
+_RULES_PER_PAGE = 8
 
 
 def _done_kb(text: str) -> InlineKeyboardMarkup:
@@ -78,7 +80,7 @@ async def _render_filter_keywords(chat_id: int) -> tuple[str, InlineKeyboardMark
     return text, InlineKeyboardMarkup(buttons)
 
 
-async def _render_filter_editor(chat_id: int, kw_id: int) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_filter_editor(chat_id: int, kw_id: int, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     chat_row = await _find_chat(chat_id)
     kw_row = await _find_keyword(kw_id)
     if not chat_row or not kw_row:
@@ -87,19 +89,31 @@ async def _render_filter_editor(chat_id: int, kw_id: int) -> tuple[str, InlineKe
     rules = await get_sender_rules_for(kw_id, chat_id)
     chat_disp = escape(chat_row["title"] or chat_row["chat_ref"])
 
+    total_pages = max(1, (len(rules) + _RULES_PER_PAGE - 1) // _RULES_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    page_rules = rules[page * _RULES_PER_PAGE:(page + 1) * _RULES_PER_PAGE]
+
     all_mark = "✅ " if mode == "all" else ""
     allow_mark = "✅ " if mode == "allowlist" else ""
     buttons = [[
         InlineKeyboardButton(f"{all_mark}Everyone", callback_data=f"rf_mode:{chat_id}:{kw_id}:all"),
         InlineKeyboardButton(f"{allow_mark}Allowlist", callback_data=f"rf_mode:{chat_id}:{kw_id}:allowlist"),
     ]]
-    for r in rules:
+    for r in page_rules:
         icon = "✅" if r["action"] == "allow" else "🔇"
         who = r["label"] or str(r["sender_id"])
         buttons.append([
             InlineKeyboardButton(f"{icon} {who}", callback_data="noop"),
-            InlineKeyboardButton("❌", callback_data=f"rf_del:{r['id']}:{chat_id}:{kw_id}"),
+            InlineKeyboardButton("❌", callback_data=f"rf_del:{r['id']}:{chat_id}:{kw_id}:{page}"),
         ])
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀", callback_data=f"rf_view:{chat_id}:{kw_id}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("▶", callback_data=f"rf_view:{chat_id}:{kw_id}:{page + 1}"))
+        buttons.append(nav)
     buttons.append([
         InlineKeyboardButton("🛡 Add admins", callback_data=f"rf_admins:{chat_id}:{kw_id}"),
         InlineKeyboardButton("📋 Last 10", callback_data=f"rf_last10:{chat_id}:{kw_id}"),
@@ -184,26 +198,33 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
         text, kb = await _render_filter_keywords(chat_id)
         await query.message.edit_text(text, reply_markup=kb)
 
-    @bot.on_callback_query(pf.regex(r"^rf_view:\d+:\d+$") & admin_cb)
+    @bot.on_callback_query(pf.regex(r"^rf_view:\d+:\d+(:\d+)?$") & admin_cb)
     async def cb_rf_view(_, query: CallbackQuery) -> None:
-        _, chat_s, kw_s = query.data.split(":")
-        text, kb = await _render_filter_editor(int(chat_s), int(kw_s))
+        parts = query.data.split(":")
+        chat_id, kw_id = int(parts[1]), int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+        text, kb = await _render_filter_editor(chat_id, kw_id, page)
         await query.message.edit_text(text, reply_markup=kb)
 
     @bot.on_callback_query(pf.regex(r"^rf_mode:\d+:\d+:(all|allowlist)$") & admin_cb)
     async def cb_rf_mode(_, query: CallbackQuery) -> None:
         _, chat_s, kw_s, mode = query.data.split(":")
-        await set_keyword_chat_mode(int(kw_s), int(chat_s), mode)
-        log.info("Radar filter: mode set kw_id=%s chat_id=%s -> %s", kw_s, chat_s, mode)
-        text, kb = await _render_filter_editor(int(chat_s), int(kw_s))
+        chat_id, kw_id = int(chat_s), int(kw_s)
+        await set_keyword_chat_mode(kw_id, chat_id, mode)
+        if mode == "all":
+            n = await clear_sender_rules(kw_id, chat_id)
+            log.info("Radar filter: mode -> all, cleared %d rule(s) kw_id=%d chat_id=%d", n, kw_id, chat_id)
+        else:
+            log.info("Radar filter: mode -> allowlist kw_id=%d chat_id=%d", kw_id, chat_id)
+        text, kb = await _render_filter_editor(chat_id, kw_id)
         await query.message.edit_text(text, reply_markup=kb)
 
-    @bot.on_callback_query(pf.regex(r"^rf_del:\d+:\d+:\d+$") & admin_cb)
+    @bot.on_callback_query(pf.regex(r"^rf_del:\d+:\d+:\d+:\d+$") & admin_cb)
     async def cb_rf_del(_, query: CallbackQuery) -> None:
-        _, rule_s, chat_s, kw_s = query.data.split(":")
+        _, rule_s, chat_s, kw_s, page_s = query.data.split(":")
         await remove_sender_rule(int(rule_s))
         log.info("Radar filter: rule removed id=%s", rule_s)
-        text, kb = await _render_filter_editor(int(chat_s), int(kw_s))
+        text, kb = await _render_filter_editor(int(chat_s), int(kw_s), int(page_s))
         await query.message.edit_text(text, reply_markup=kb)
 
     @bot.on_callback_query(pf.regex(r"^rf_add:\d+:\d+:-?\d+:(allow|mute)$") & admin_cb)

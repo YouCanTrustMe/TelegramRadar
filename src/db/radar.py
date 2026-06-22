@@ -228,6 +228,16 @@ async def remove_sender_rule(rule_id: int) -> bool:
         return cur.rowcount > 0
 
 
+async def clear_sender_rules(keyword_id: int, chat_id: int) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM radar_sender_rules WHERE keyword_id = ? AND chat_id = ?",
+            (keyword_id, chat_id),
+        )
+        await db.commit()
+        return cur.rowcount
+
+
 async def get_sender_rules_for(keyword_id: int, chat_id: int) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
