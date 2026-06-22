@@ -6,8 +6,9 @@ import aiosqlite
 from src.collectors.userbot import userbot
 from src.db.base import get_db
 from src.db.radar import (
+    get_all_sender_rules,
     get_keyword_chat_links,
-    get_radar_blacklist,
+    get_keyword_chat_modes,
     get_radar_chats,
     get_radar_keywords,
     update_radar_last_message_at,
@@ -32,9 +33,10 @@ async def _set_last_seen(entry_id: int, msg_id: int) -> None:
 async def _poll_chat(
     row: aiosqlite.Row,
     *,
-    blacklisted_ids: set[int],
     keywords: list,
     linked_kw_ids: set[int],
+    modes: dict[tuple[int, int], str],
+    rules: dict[tuple[int, int, int], str],
 ) -> int:
     keys = row.keys()
     chat_id = row["chat_id"] if "chat_id" in keys else None
@@ -70,9 +72,10 @@ async def _poll_chat(
             if await process_radar_message(
                 msg,
                 row,
-                blacklisted_ids=blacklisted_ids,
                 keywords=keywords,
                 linked_kw_ids=linked_kw_ids,
+                modes=modes,
+                rules=rules,
             ):
                 alerts += 1
         except Exception:
@@ -90,11 +93,12 @@ async def run_radar_collector() -> None:
     while True:
         try:
             chats = await get_radar_chats()
-            blacklisted_ids = {r["user_id"] for r in await get_radar_blacklist()}
             keywords = await get_radar_keywords()
             links_by_chat: dict[int, set[int]] = {}
             for link in await get_keyword_chat_links():
                 links_by_chat.setdefault(link["chat_id"], set()).add(link["keyword_id"])
+            modes = await get_keyword_chat_modes()
+            rules = await get_all_sender_rules()
 
             total_alerts = 0
             for row in chats:
@@ -102,9 +106,10 @@ async def run_radar_collector() -> None:
                     continue
                 total_alerts += await _poll_chat(
                     row,
-                    blacklisted_ids=blacklisted_ids,
                     keywords=keywords,
                     linked_kw_ids=links_by_chat.get(row["id"], set()),
+                    modes=modes,
+                    rules=rules,
                 )
             if total_alerts:
                 log.info("Radar poll cycle: %d alert(s) sent", total_alerts)

@@ -54,6 +54,8 @@ async def _render_chat_edit(chat_id: int, page: int) -> tuple[str, InlineKeyboar
             nav.append(InlineKeyboardButton("▶", callback_data=f"radar_chat_view:{chat_id}:{page + 1}"))
         buttons.append(nav)
 
+    if linked:
+        buttons.append([InlineKeyboardButton("⚙️ Sender filters", callback_data=f"rf_chat:{chat_id}")])
     buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_chats:0")])
 
     status_line = f" · status: <b>{chat_row['status']}</b>" if chat_row["status"] != "active" else ""

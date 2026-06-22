@@ -47,7 +47,12 @@ async def close_session() -> None:
         _session = None
 
 
-async def send_to(chat_id: int, text: str, disable_notification: bool = False) -> None:
+async def send_to(
+    chat_id: int,
+    text: str,
+    disable_notification: bool = False,
+    reply_markup: dict | None = None,
+) -> None:
     payload: dict = {
         "chat_id": chat_id,
         "text": text,
@@ -55,6 +60,8 @@ async def send_to(chat_id: int, text: str, disable_notification: bool = False) -
         "disable_web_page_preview": True,
         "disable_notification": disable_notification,
     }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     for attempt in range(1, _SEND_RETRIES + 1):
         try:
             async with _get_session().post(f"{_BOT_API}/sendMessage", json=payload) as resp:
