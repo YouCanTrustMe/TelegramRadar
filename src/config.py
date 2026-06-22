@@ -16,5 +16,9 @@ class Settings(BaseSettings):
     database_path: str = "data/radar.db"
     radar_timezone: str = "Europe/Berlin"
 
+    # Weekly quiet-log digest of muted matches (cron day-of-week + hour, local tz)
+    radar_digest_day: str = "mon"
+    radar_digest_hour: int = 9
+
 
 settings = Settings()
