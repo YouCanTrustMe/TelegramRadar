@@ -12,6 +12,7 @@ userbot = Client(
     api_id=settings.telegram_api_id,
     api_hash=settings.telegram_api_hash,
     phone_number=settings.telegram_phone,
+    no_updates=True,
 )
 
 
