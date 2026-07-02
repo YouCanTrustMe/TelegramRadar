@@ -248,38 +248,6 @@ async def get_sender_rules_for(keyword_id: int, chat_id: int) -> list[aiosqlite.
             return await cur.fetchall()
 
 
-async def mute_sender_in_chat(chat_id: int, sender_id: int, label: str | None) -> int:
-    """Mute a sender for every keyword linked to the chat (the alert '🔇' button)."""
-    async with get_db() as db:
-        cur = await db.execute(
-            "INSERT INTO radar_sender_rules (keyword_id, chat_id, sender_id, action, label) "
-            "SELECT keyword_id, chat_id, ?, 'mute', ? FROM radar_keyword_chats WHERE chat_id = ? "
-            "ON CONFLICT(keyword_id, chat_id, sender_id) DO UPDATE SET "
-            "action = 'mute', label = excluded.label",
-            (sender_id, label, chat_id),
-        )
-        await db.commit()
-        return cur.rowcount
-
-
-async def allow_only_sender_in_chat(chat_id: int, sender_id: int, label: str | None) -> int:
-    """Switch every keyword link of the chat to allowlist and allow this sender (the '✅' button)."""
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE radar_keyword_chats SET sender_mode = 'allowlist' WHERE chat_id = ?",
-            (chat_id,),
-        )
-        cur = await db.execute(
-            "INSERT INTO radar_sender_rules (keyword_id, chat_id, sender_id, action, label) "
-            "SELECT keyword_id, chat_id, ?, 'allow', ? FROM radar_keyword_chats WHERE chat_id = ? "
-            "ON CONFLICT(keyword_id, chat_id, sender_id) DO UPDATE SET "
-            "action = 'allow', label = excluded.label",
-            (sender_id, label, chat_id),
-        )
-        await db.commit()
-        return cur.rowcount
-
-
 async def get_author_label(author_id: int) -> str | None:
     async with get_db() as db:
         async with db.execute(

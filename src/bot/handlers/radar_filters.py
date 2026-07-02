@@ -1,7 +1,7 @@
 """Sender filtering: the inline 🔇/✅ buttons attached to every alert, and the
-per keyword×chat filter editor (mode + allow/mute rules). 'Mute sender' and
-'Only this' act chat-wide (across all keywords linked to that chat); the editor
-gives per-keyword control."""
+per keyword×chat filter editor (mode + allow/mute rules). Both the alert buttons
+and the editor act per keyword×chat — the alert carries one button pair per
+matched keyword."""
 import logging
 from html import escape
 
@@ -13,7 +13,6 @@ from src.bot.keyboards import _back_kb
 from src.collectors.userbot import userbot
 from src.db.radar import (
     add_sender_rule,
-    allow_only_sender_in_chat,
     clear_sender_rules,
     get_author_label,
     get_keyword_chat_modes,
@@ -23,7 +22,6 @@ from src.db.radar import (
     get_radar_keywords,
     get_recent_trigger_senders,
     get_sender_rules_for,
-    mute_sender_in_chat,
     remove_sender_rule,
     set_keyword_chat_mode,
 )
@@ -35,8 +33,37 @@ _RECENT_SENDERS_LIMIT = 10
 _RULES_PER_PAGE = 8
 
 
-def _done_kb(text: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data="noop")]])
+def _action_target(cd: str | None) -> tuple[int, int, int] | None:
+    if not cd:
+        return None
+    parts = cd.split(":")
+    if len(parts) == 4 and parts[0] in ("rmute", "ronly"):
+        try:
+            return int(parts[1]), int(parts[2]), int(parts[3])
+        except ValueError:
+            return None
+    return None
+
+
+async def _mark_row_done(
+    query: CallbackQuery, kw_id: int, chat_id: int, sender_id: int, text: str
+) -> None:
+    """Replace only the acted keyword's button row with a confirmation, leaving the
+    Open-message button and any other keyword rows tappable."""
+    target = (kw_id, chat_id, sender_id)
+    markup = query.message.reply_markup
+    rows = [
+        [InlineKeyboardButton(text, callback_data="noop")]
+        if any(_action_target(b.callback_data) == target for b in row)
+        else row
+        for row in (markup.inline_keyboard if markup else [])
+    ]
+    if not rows:
+        rows = [[InlineKeyboardButton(text, callback_data="noop")]]
+    try:
+        await query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+    except Exception as exc:
+        log.debug("mark_row_done: could not edit markup: %s", exc)
 
 
 async def _render_muted() -> str:
@@ -162,31 +189,30 @@ async def _render_last10(chat_id: int, kw_id: int) -> tuple[str, InlineKeyboardM
 
 def register_filters(bot, admin_msg, admin_cb) -> None:
 
-    @bot.on_callback_query(pf.regex(r"^rmute:\d+:-?\d+$") & admin_cb)
+    @bot.on_callback_query(pf.regex(r"^rmute:\d+:\d+:-?\d+$") & admin_cb)
     async def cb_rmute(_, query: CallbackQuery) -> None:
-        _, chat_id_s, sender_id_s = query.data.split(":")
-        chat_id, sender_id = int(chat_id_s), int(sender_id_s)
+        _, kw_s, chat_s, sender_s = query.data.split(":")
+        kw_id, chat_id, sender_id = int(kw_s), int(chat_s), int(sender_s)
         label = await get_author_label(sender_id)
-        n = await mute_sender_in_chat(chat_id, sender_id, label)
-        log.info("Radar filter: muted sender=%s in chat_id=%d (%d keyword link(s))", sender_id, chat_id, n)
+        await add_sender_rule(kw_id, chat_id, sender_id, "mute", label)
+        kw_row = await _find_keyword(kw_id)
+        kw_name = kw_row["keyword"] if kw_row else kw_id
+        log.info("Radar filter: muted sender=%s kw_id=%d chat_id=%d", sender_id, kw_id, chat_id)
         await query.answer("🔇 Muted — their matches go to the quiet log", show_alert=False)
-        try:
-            await query.message.edit_reply_markup(_done_kb(f"🔇 Muted {label or sender_id} ✓"))
-        except Exception as exc:
-            log.debug("rmute: could not edit markup: %s", exc)
+        await _mark_row_done(query, kw_id, chat_id, sender_id, f"🔇 Muted {label or sender_id} · {kw_name} ✓")
 
-    @bot.on_callback_query(pf.regex(r"^ronly:\d+:-?\d+$") & admin_cb)
+    @bot.on_callback_query(pf.regex(r"^ronly:\d+:\d+:-?\d+$") & admin_cb)
     async def cb_ronly(_, query: CallbackQuery) -> None:
-        _, chat_id_s, sender_id_s = query.data.split(":")
-        chat_id, sender_id = int(chat_id_s), int(sender_id_s)
+        _, kw_s, chat_s, sender_s = query.data.split(":")
+        kw_id, chat_id, sender_id = int(kw_s), int(chat_s), int(sender_s)
         label = await get_author_label(sender_id)
-        n = await allow_only_sender_in_chat(chat_id, sender_id, label)
-        log.info("Radar filter: allowlist-only sender=%s in chat_id=%d (%d keyword link(s))", sender_id, chat_id, n)
-        await query.answer("✅ Now alerting only from this sender in this chat", show_alert=True)
-        try:
-            await query.message.edit_reply_markup(_done_kb(f"✅ Only {label or sender_id} ✓"))
-        except Exception as exc:
-            log.debug("ronly: could not edit markup: %s", exc)
+        await set_keyword_chat_mode(kw_id, chat_id, "allowlist")
+        await add_sender_rule(kw_id, chat_id, sender_id, "allow", label)
+        kw_row = await _find_keyword(kw_id)
+        kw_name = kw_row["keyword"] if kw_row else kw_id
+        log.info("Radar filter: allowlist-only sender=%s kw_id=%d chat_id=%d", sender_id, kw_id, chat_id)
+        await query.answer("✅ Now alerting only from this sender for this keyword", show_alert=True)
+        await _mark_row_done(query, kw_id, chat_id, sender_id, f"✅ Only {label or sender_id} · {kw_name} ✓")
 
     @bot.on_callback_query(pf.regex(r"^radar_muted$") & admin_cb)
     async def cb_radar_muted(_, query: CallbackQuery) -> None:

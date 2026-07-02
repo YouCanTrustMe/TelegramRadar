@@ -134,17 +134,20 @@ async def process_radar_message(
         f"<blockquote>{kw_str}</blockquote>\n"
         f"💬 Chat: {chat_disp}\n"
         f"👤 From: {from_str}\n"
-        f'🔗 <a href="{escape(msg_link, quote=True)}">Open message</a> · ⏱️ {ts}\n'
+        f"⏱️ {ts}\n"
         f"<blockquote expandable>{escape(short_text)}</blockquote>"
     )
-    reply_markup = None
+    keyboard = [[{"text": "🔗 Open message", "url": msg_link}]]
     if sender_id is not None:
-        reply_markup = {
-            "inline_keyboard": [[
-                {"text": "🔇 Mute sender", "callback_data": f"rmute:{chat_db_id}:{sender_id}"},
-                {"text": "✅ Only this", "callback_data": f"ronly:{chat_db_id}:{sender_id}"},
-            ]]
-        }
+        for kw in passing:
+            kw_id = kw_id_by_text.get(kw)
+            if kw_id is None:
+                continue
+            keyboard.append([
+                {"text": f"🔇 Mute · {kw}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
+                {"text": f"✅ Only · {kw}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
+            ])
+    reply_markup = {"inline_keyboard": keyboard}
     await send_to(settings.telegram_admin_id, alert_body, reply_markup=reply_markup)
     for kw in passing:
         await log_radar_alert(kw, chat_ref_str, author_id, text, msg_link, author_name, "sent")
