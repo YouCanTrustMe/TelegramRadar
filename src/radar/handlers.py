@@ -82,10 +82,14 @@ async def process_radar_message(
     sender_id = author_id
     if author:
         author_name = name
+        btn_sender = f"@{author.username}" if author.username else (author.first_name or str(author_id))
     elif sender_chat:
         author_name = sender_chat.title or None
+        btn_sender = f"@{sender_chat.username}" if sender_chat.username else (sender_chat.title or str(author_id))
     else:
         author_name = None
+        btn_sender = str(sender_id)
+    btn_sender = btn_sender[:20]
 
     # Per keyword×chat sender filter: 'all' alerts unless the sender is muted,
     # 'allowlist' alerts only from explicitly allowed senders. Suppressed matches
@@ -144,8 +148,8 @@ async def process_radar_message(
             if kw_id is None:
                 continue
             keyboard.append([
-                {"text": f"🔇 Mute · {kw}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
-                {"text": f"✅ Only · {kw}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
+                {"text": f"🔇 Mute {btn_sender} · {kw}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
+                {"text": f"✅ Only {btn_sender} · {kw}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
             ])
     reply_markup = {"inline_keyboard": keyboard}
     await send_to(settings.telegram_admin_id, alert_body, reply_markup=reply_markup)

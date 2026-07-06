@@ -21,7 +21,13 @@ async def send_muted_digest() -> None:
     total = sum(r["cnt"] for r in rows)
     lines = []
     for r in rows[:_MAX_LINES]:
-        sample = f" (e.g. {escape(r['sample_author'])})" if r["sample_author"] else ""
+        who = escape(r["sample_author"]) if r["sample_author"] else "latest"
+        if r["sample_url"]:
+            sample = f' (e.g. <a href="{escape(r["sample_url"])}">{who}</a>)'
+        elif r["sample_author"]:
+            sample = f" (e.g. {who})"
+        else:
+            sample = ""
         lines.append(
             f"• <b>{escape(r['keyword'])}</b> in {escape(r['chat_ref'])} — "
             f"{r['cnt']}×{sample}"

@@ -289,10 +289,18 @@ async def get_muted_alerts(limit: int = 20) -> list[aiosqlite.Row]:
 async def get_muted_summary_since(days: int = 7) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            "SELECT keyword, chat_ref, COUNT(*) AS cnt, MAX(author_name) AS sample_author "
-            "FROM radar_alert_log "
+            "SELECT keyword, chat_ref, COUNT(*) AS cnt, "
+            "(SELECT author_name FROM radar_alert_log l2 "
+            " WHERE l2.keyword = l1.keyword AND l2.chat_ref = l1.chat_ref "
+            "   AND l2.status = 'muted' AND l2.alerted_at >= datetime('now', ?) "
+            " ORDER BY l2.id DESC LIMIT 1) AS sample_author, "
+            "(SELECT message_url FROM radar_alert_log l2 "
+            " WHERE l2.keyword = l1.keyword AND l2.chat_ref = l1.chat_ref "
+            "   AND l2.status = 'muted' AND l2.alerted_at >= datetime('now', ?) "
+            " ORDER BY l2.id DESC LIMIT 1) AS sample_url "
+            "FROM radar_alert_log l1 "
             "WHERE status = 'muted' AND alerted_at >= datetime('now', ?) "
             "GROUP BY keyword, chat_ref ORDER BY cnt DESC",
-            (f"-{days} days",),
+            (f"-{days} days", f"-{days} days", f"-{days} days"),
         ) as cur:
             return await cur.fetchall()

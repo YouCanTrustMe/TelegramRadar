@@ -73,9 +73,10 @@ async def _render_muted() -> str:
     lines = []
     for r in rows:
         who = escape(r["author_name"]) if r["author_name"] else str(r["author_id"])
+        link = f' <a href="{escape(r["message_url"])}">🔗</a>' if r["message_url"] else ""
         lines.append(
             f"• <b>{escape(r['keyword'])}</b> in {escape(r['chat_ref'])} — "
-            f"{who} — {r['alerted_at'][:16]}"
+            f"{who} — {r['alerted_at'][:16]}{link}"
         )
     return f"🔇 <b>Quiet log</b> (last {len(rows)} muted)\n\n" + "\n".join(lines)
 
@@ -216,7 +217,9 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_callback_query(pf.regex(r"^radar_muted$") & admin_cb)
     async def cb_radar_muted(_, query: CallbackQuery) -> None:
-        await query.message.edit_text(await _render_muted(), reply_markup=_back_kb("radar_main"))
+        await query.message.edit_text(
+            await _render_muted(), reply_markup=_back_kb("radar_main"), disable_web_page_preview=True
+        )
 
     @bot.on_callback_query(pf.regex(r"^rf_chat:\d+$") & admin_cb)
     async def cb_rf_chat(_, query: CallbackQuery) -> None:
