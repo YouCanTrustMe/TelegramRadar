@@ -20,5 +20,12 @@ class Settings(BaseSettings):
     radar_digest_day: str = "mon"
     radar_digest_hour: int = 9
 
+    # Keyword obfuscation handling. Fuzzy trades precision for recall: it cannot
+    # tell a typo from a real word one edit away, and fires on both.
+    radar_match_leet: bool = True
+    radar_match_fuzzy: bool = True
+    radar_match_translit: bool = True
+    radar_match_merge_min_len: int = 5
+
 
 settings = Settings()

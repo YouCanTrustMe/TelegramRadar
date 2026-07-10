@@ -46,7 +46,14 @@ async def process_radar_message(
     if not chat_keywords:
         log.debug("Radar: msg=%s skipped — no keywords linked to chat db_id=%s", message.id, chat_row["id"])
         return False
-    matched = match_keywords(text, chat_keywords)
+    matched = match_keywords(
+        text,
+        chat_keywords,
+        leet=settings.radar_match_leet,
+        fuzzy=settings.radar_match_fuzzy,
+        translit=settings.radar_match_translit,
+        merge_min_len=settings.radar_match_merge_min_len,
+    )
     if not matched:
         log.debug("Radar: msg=%s skipped — no keyword match (checked: %s)", message.id, chat_keywords)
         return False
