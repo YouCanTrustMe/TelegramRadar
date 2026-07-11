@@ -155,8 +155,8 @@ async def process_radar_message(
             if kw_id is None:
                 continue
             keyboard.append([
-                {"text": f"🔇 Mute {btn_sender} · {kw}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
-                {"text": f"✅ Only {btn_sender} · {kw}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
+                {"text": f"🔇 {btn_sender} · {kw}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
+                {"text": f"✅👤 {btn_sender} · {kw}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
             ])
     reply_markup = {"inline_keyboard": keyboard}
     await send_to(settings.telegram_admin_id, alert_body, reply_markup=reply_markup)

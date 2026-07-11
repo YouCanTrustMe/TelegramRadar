@@ -200,7 +200,7 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
         kw_name = kw_row["keyword"] if kw_row else kw_id
         log.info("Radar filter: muted sender=%s kw_id=%d chat_id=%d", sender_id, kw_id, chat_id)
         await query.answer("🔇 Muted — their matches go to the quiet log", show_alert=False)
-        await _mark_row_done(query, kw_id, chat_id, sender_id, f"🔇 Muted {label or sender_id} · {kw_name} ✓")
+        await _mark_row_done(query, kw_id, chat_id, sender_id, f"🔇 {label or sender_id} · {kw_name} ✓")
 
     @bot.on_callback_query(pf.regex(r"^ronly:\d+:\d+:-?\d+$") & admin_cb)
     async def cb_ronly(_, query: CallbackQuery) -> None:
@@ -213,7 +213,7 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
         kw_name = kw_row["keyword"] if kw_row else kw_id
         log.info("Radar filter: allowlist-only sender=%s kw_id=%d chat_id=%d", sender_id, kw_id, chat_id)
         await query.answer("✅ Now alerting only from this sender for this keyword", show_alert=True)
-        await _mark_row_done(query, kw_id, chat_id, sender_id, f"✅ Only {label or sender_id} · {kw_name} ✓")
+        await _mark_row_done(query, kw_id, chat_id, sender_id, f"✅👤 {label or sender_id} · {kw_name} ✓")
 
     @bot.on_callback_query(pf.regex(r"^radar_muted$") & admin_cb)
     async def cb_radar_muted(_, query: CallbackQuery) -> None:
