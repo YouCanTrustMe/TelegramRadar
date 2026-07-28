@@ -9,6 +9,11 @@ from src.config import settings
 
 log = logging.getLogger(__name__)
 
+# Transport failures are logged to a child logger that AdminAlertLogHandler
+# ignores: reporting "the Bot API is unreachable" through the Bot API only
+# multiplies the outage. They stay in stdout and data/logs/radar.log.
+log_transport = logging.getLogger(f"{__name__}.transport")
+
 bot = Client(
     "sessions/radar_bot",
     bot_token=settings.telegram_bot_token,
@@ -18,12 +23,22 @@ bot = Client(
 
 _BOT_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 
-_TIMEOUT = aiohttp.ClientTimeout(total=30)
+_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=10)
 
 _SEND_RETRIES = 3
 _SEND_BACKOFF = 2
 
+# Only failures that happened before the request reached Telegram may be retried;
+# anything raised while awaiting the response (read/total timeout, dropped
+# connection) is ambiguous — Telegram may have already accepted the message, and
+# a retry then delivers a duplicate. sendMessage has no idempotency key.
+_RETRYABLE = (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError)
+
 _session: aiohttp.ClientSession | None = None
+
+
+class SendFailed(Exception):
+    """sendMessage did not return 200; whether Telegram delivered it is unknown."""
 
 
 def _get_session() -> aiohttp.ClientSession:
@@ -52,6 +67,7 @@ async def send_to(
     text: str,
     disable_notification: bool = False,
     reply_markup: dict | None = None,
+    retry: bool = True,
 ) -> None:
     payload: dict = {
         "chat_id": chat_id,
@@ -62,36 +78,44 @@ async def send_to(
     }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
-    for attempt in range(1, _SEND_RETRIES + 1):
+    attempts = _SEND_RETRIES if retry else 1
+    for attempt in range(1, attempts + 1):
         try:
             async with _get_session().post(f"{_BOT_API}/sendMessage", json=payload) as resp:
                 if resp.status == 200:
                     return
                 body = await resp.text()
-                if resp.status == 429 and attempt < _SEND_RETRIES:
+                if resp.status == 429 and attempt < attempts:
                     retry_after = _retry_after(body, _SEND_BACKOFF * attempt)
                     log.warning(
                         "Bot API sendMessage rate-limited (attempt %d/%d), retrying in %ss: %s",
-                        attempt, _SEND_RETRIES, retry_after, body,
+                        attempt, attempts, retry_after, body,
                     )
                     await asyncio.sleep(retry_after)
                     continue
                 log.error("Bot API sendMessage (send_to) failed: %s %s", resp.status, body)
-                return
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            if attempt < _SEND_RETRIES:
+                raise SendFailed(f"HTTP {resp.status}: {body[:200]}")
+        except _RETRYABLE as exc:
+            if attempt < attempts:
                 delay = _SEND_BACKOFF * attempt
-                log.warning(
-                    "Bot API sendMessage attempt %d/%d failed (chat=%s), retrying in %ss: %r",
-                    attempt, _SEND_RETRIES, chat_id, delay, exc,
+                log_transport.warning(
+                    "Bot API sendMessage attempt %d/%d could not connect (chat=%s), retrying in %ss: %r",
+                    attempt, attempts, chat_id, delay, exc,
                 )
                 await asyncio.sleep(delay)
                 continue
-            log.error(
-                "Bot API sendMessage gave up after %d attempts (chat=%s): %r",
-                _SEND_RETRIES, chat_id, exc,
+            log_transport.error(
+                "Bot API sendMessage gave up after %d attempts (chat=%s, not delivered): %r",
+                attempts, chat_id, exc,
             )
-            raise
+            raise SendFailed(f"could not connect after {attempts} attempts: {exc!r}") from exc
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log_transport.error(
+                "Bot API sendMessage failed after the request was sent (chat=%s, attempt %d/%d): %r "
+                "— not retrying, Telegram may have accepted it",
+                chat_id, attempt, attempts, exc,
+            )
+            raise SendFailed(f"no response from Bot API: {exc!r}") from exc
 
 
 async def send_document(chat_id: int, file_path: str, filename: str | None = None) -> None:

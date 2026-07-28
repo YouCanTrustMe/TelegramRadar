@@ -5,8 +5,9 @@ from zoneinfo import ZoneInfo
 
 from src.config import settings
 from src.db.radar import log_radar_alert
-from src.dispatcher.sender import send_to
+from src.dispatcher.sender import SendFailed, send_to
 from src.radar.matcher import match_keywords
+from src.radar.pending import queue_alert
 
 log = logging.getLogger(__name__)
 
@@ -159,7 +160,23 @@ async def process_radar_message(
                 {"text": f"✅👤 {btn_sender} · {kw}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
             ])
     reply_markup = {"inline_keyboard": keyboard}
-    await send_to(settings.telegram_admin_id, alert_body, reply_markup=reply_markup)
+    try:
+        await send_to(settings.telegram_admin_id, alert_body, reply_markup=reply_markup)
+    except SendFailed as exc:
+        log_entries = [
+            {
+                "keyword": kw, "chat_ref": chat_ref_str, "author_id": author_id,
+                "message_text": text, "message_url": msg_link, "author_name": author_name,
+            }
+            for kw in passing
+        ]
+        queued = await queue_alert(msg_link, alert_body, reply_markup, log_entries)
+        log.warning(
+            "Radar alert not confirmed, %s: keywords=%s chat=%s author_id=%s msg=%s url=%s: %s",
+            "queued for resend" if queued else "already queued",
+            passing, chat_title, author_id, message.id, msg_link, exc,
+        )
+        return False
     for kw in passing:
         await log_radar_alert(kw, chat_ref_str, author_id, text, msg_link, author_name, "sent")
     log.info(

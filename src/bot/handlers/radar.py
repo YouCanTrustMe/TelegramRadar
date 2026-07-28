@@ -14,6 +14,7 @@ from src.bot.handlers.radar_keywords import handle_keyword_input, register_keywo
 from src.bot.keyboards import _back_kb
 from src.bot.state import _pending
 from src.db.radar import (
+    count_pending_alerts,
     get_radar_chats,
     get_radar_keywords,
     get_recent_radar_alerts,
@@ -21,6 +22,7 @@ from src.db.radar import (
 )
 
 _SILENT_THRESHOLD_HOURS = 120
+_STATUS_MARK = {"muted": " 🔇", "failed": " ⚠️ not delivered"}
 
 log = logging.getLogger(__name__)
 
@@ -66,8 +68,12 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
         if alerts:
             alert_lines = "\n\n<b>Last alerts:</b>\n" + "\n".join(
                 f"• \"{escape(r['keyword'])}\" in {escape(r['chat_ref'])} — {r['alerted_at'][:16]}"
+                f"{_STATUS_MARK.get(r['status'], '')}"
                 for r in alerts
             )
+
+        pending = await count_pending_alerts()
+        pending_line = f"\nAwaiting resend: <b>{pending}</b>" if pending else ""
 
         quiet_lines = ""
         silent = await get_silent_radar_chats(_SILENT_THRESHOLD_HOURS)
@@ -82,6 +88,7 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
             f"Chats monitored: <b>{len(chats)}</b>\n"
             f"Keywords active: <b>{len(keywords)}</b>\n"
             f"Uptime: <b>{hours}h {minutes}m</b>"
+            f"{pending_line}"
             f"{alert_lines}"
             f"{quiet_lines}"
         )

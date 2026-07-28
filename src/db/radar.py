@@ -1,5 +1,6 @@
 """Radar storage: keywords, monitored chats, keyword↔chat links, per-source
-sender filtering rules, the alert/quiet log and chat-silence tracking."""
+sender filtering rules, the alert/quiet log, the undelivered-alert queue and
+chat-silence tracking."""
 import aiosqlite
 
 from src.db.base import get_db
@@ -304,3 +305,52 @@ async def get_muted_summary_since(days: int = 7) -> list[aiosqlite.Row]:
             (f"-{days} days", f"-{days} days", f"-{days} days"),
         ) as cur:
             return await cur.fetchall()
+
+
+# --- undelivered alert queue ---
+
+async def enqueue_pending_alert(
+    message_url: str, body: str, reply_markup: str | None, log_payload: str
+) -> bool:
+    """Park an unconfirmed alert for a later resend. Returns False if already queued."""
+    async with get_db() as db:
+        async with db.execute(
+            "INSERT OR IGNORE INTO radar_pending_alerts "
+            "(message_url, body, reply_markup, log_payload) VALUES (?, ?, ?, ?)",
+            (message_url, body, reply_markup, log_payload),
+        ) as cur:
+            queued = cur.rowcount > 0
+        await db.commit()
+        return queued
+
+
+async def get_due_pending_alerts(limit: int = 10) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT * FROM radar_pending_alerts WHERE next_attempt_at <= datetime('now') "
+            "ORDER BY id LIMIT ?",
+            (limit,),
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def count_pending_alerts() -> int:
+    async with get_db() as db:
+        async with db.execute("SELECT COUNT(*) FROM radar_pending_alerts") as cur:
+            return (await cur.fetchone())[0]
+
+
+async def drop_pending_alert(entry_id: int) -> None:
+    async with get_db() as db:
+        await db.execute("DELETE FROM radar_pending_alerts WHERE id = ?", (entry_id,))
+        await db.commit()
+
+
+async def defer_pending_alert(entry_id: int, delay_minutes: int, error: str) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE radar_pending_alerts SET attempts = attempts + 1, last_error = ?, "
+            "next_attempt_at = datetime('now', ?) WHERE id = ?",
+            (error[:200], f"+{delay_minutes} minutes", entry_id),
+        )
+        await db.commit()

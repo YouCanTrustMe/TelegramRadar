@@ -14,6 +14,7 @@ from src.db.radar import (
     update_radar_last_message_at,
 )
 from src.radar.handlers import process_radar_message
+from src.radar.pending import flush_pending_alerts
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,11 @@ async def run_radar_collector() -> None:
     log.info("Radar collector started (interval=%ds)", POLL_INTERVAL)
     while True:
         try:
+            # The resend queue is best-effort; monitoring must never wait on it.
+            try:
+                await flush_pending_alerts()
+            except Exception:
+                log.exception("Radar resend queue failed, continuing with the poll")
             chats = await get_radar_chats()
             keywords = await get_radar_keywords()
             links_by_chat: dict[int, set[int]] = {}

@@ -14,6 +14,8 @@ _WHITELIST_PREFIXES = (
     "src.dispatcher.",
     "src.scheduler",
 )
+# Forwarding these would report a broken Bot API through the broken Bot API.
+_DENY_PREFIXES = ("src.dispatcher.sender.transport",)
 
 _last_sent: dict[str, float] = {}
 _lock = asyncio.Lock()
@@ -35,7 +37,7 @@ async def admin_alert(text: str, key: str | None = None, silent: bool = True) ->
             return False
         _last_sent[throttle_key] = now
     try:
-        await send_to(settings.telegram_admin_id, text, disable_notification=silent)
+        await send_to(settings.telegram_admin_id, text, disable_notification=silent, retry=False)
         return True
     except Exception as exc:
         log.warning("admin_alert failed: %s", exc)
@@ -54,6 +56,8 @@ class AdminAlertLogHandler(logging.Handler):
         if record.name == __name__ or record.name.endswith(".admin_alert"):
             return
         if not any(record.name.startswith(p) for p in _WHITELIST_PREFIXES):
+            return
+        if any(record.name.startswith(p) for p in _DENY_PREFIXES):
             return
         try:
             msg = self.format(record)
