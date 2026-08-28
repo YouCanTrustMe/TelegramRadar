@@ -27,6 +27,7 @@ from src.db.radar import (
     get_sender_rules_for,
     remove_sender_rule,
     remove_sender_rules_for,
+    reset_empty_allowlists,
     set_keyword_chat_mode,
 )
 from src.radar.matcher import keyword_display
@@ -364,7 +365,8 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
     async def cb_rf_del(_, query: CallbackQuery) -> None:
         _, rule_s, chat_s, kw_s, page_s = query.data.split(":")
         await remove_sender_rule(int(rule_s))
-        log.info("Radar filter: rule removed id=%s", rule_s)
+        reopened = await reset_empty_allowlists()
+        log.info("Radar filter: rule removed id=%s, allowlists reopened=%d", rule_s, reopened)
         text, kb = await _render_filter_editor(int(chat_s), int(kw_s), int(page_s))
         await query.message.edit_text(text, reply_markup=kb)
 
@@ -421,7 +423,11 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
     async def cb_rms_del(_, query: CallbackQuery) -> None:
         _, rule_s, sender_s = query.data.split(":")
         await remove_sender_rule(int(rule_s))
-        log.info("Radar filter: rule removed id=%s sender=%s", rule_s, sender_s)
+        reopened = await reset_empty_allowlists()
+        log.info(
+            "Radar filter: rule removed id=%s sender=%s, allowlists reopened=%d",
+            rule_s, sender_s, reopened,
+        )
         text, kb = await _render_sender_detail(int(sender_s))
         await query.message.edit_text(text, reply_markup=kb)
 
@@ -429,10 +435,13 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
     async def cb_rms_clear(_, query: CallbackQuery) -> None:
         _, sender_s, action, page_s = query.data.split(":")
         removed = await remove_sender_rules_for(int(sender_s), action)
+        reopened = await reset_empty_allowlists()
         log.info(
-            "Radar filter: cleared %d %s rule(s) for sender=%s", removed, action, sender_s
+            "Radar filter: cleared %d %s rule(s) for sender=%s, allowlists reopened=%d",
+            removed, action, sender_s, reopened,
         )
-        await query.answer(f"Removed {removed} rule(s)")
+        note = f", {reopened} keyword(s) back to everyone" if reopened else ""
+        await query.answer(f"Removed {removed} rule(s){note}")
         text, kb = await _render_sender_list(action, int(page_s))
         await query.message.edit_text(text, reply_markup=kb)
 

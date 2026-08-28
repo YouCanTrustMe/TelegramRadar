@@ -122,10 +122,10 @@ def test_seen_codes_suppress_a_repeat(db):
 def test_repeat_sightings_are_counted(db):
     async def scenario():
         await record_seen_codes(["R6S9A"], "@chat", "https://t.me/chat/1")
-        assert await count_repeat_codes(7) == 0
+        assert await count_repeat_codes() == 0
         await record_seen_codes(["R6S9A"], "@chat", "https://t.me/chat/2")
         await record_seen_codes(["R6S9A"], "@other", "https://t.me/other/9")
-        assert await count_repeat_codes(7) == 2
+        assert await count_repeat_codes() == 2
 
     run(scenario())
 
@@ -148,13 +148,17 @@ def test_a_code_older_than_the_window_alerts_again(db):
     run(scenario())
 
 
-def test_repeat_count_only_covers_the_window(db):
+def test_the_purge_is_what_bounds_the_repeat_count(db):
+    """`hits` counts a code's whole life, so the count cannot be sliced by a
+    window — dropping the row on retention is what retires it."""
     async def scenario():
         await record_seen_codes(["R6S9A"], "@chat", "https://t.me/chat/1")
         await record_seen_codes(["R6S9A"], "@chat", "https://t.me/chat/2")
-        assert await count_repeat_codes(7) == 1
-        await _backdate("R6S9A", 8)
-        assert await count_repeat_codes(7) == 0
+        assert await count_repeat_codes() == 1
+        await _backdate("R6S9A", 20)
+        assert await count_repeat_codes() == 1
+        await purge_seen_codes(14)
+        assert await count_repeat_codes() == 0
 
     run(scenario())
 

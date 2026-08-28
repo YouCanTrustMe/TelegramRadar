@@ -40,6 +40,8 @@ async def _record(entries: list[dict], status: str) -> None:
         await log_radar_alert(
             e["keyword"], e["chat_ref"], e["author_id"], e["message_text"],
             e["message_url"], e["author_name"], status,
+            # Queued before the column existed, or written by an older build.
+            e.get("chat_db_id"),
         )
 
 

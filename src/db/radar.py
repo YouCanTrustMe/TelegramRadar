@@ -256,6 +256,24 @@ async def clear_sender_rules(keyword_id: int, chat_id: int) -> int:
         return cur.rowcount
 
 
+async def reset_empty_allowlists() -> int:
+    """Put back to 'all' any keyword×chat left in allowlist mode with nobody on it.
+
+    An empty allowlist alerts on nothing, silently — the one filter state that
+    looks configured but reports nothing. Removing the last allow rule is how you
+    get there, so this runs after every rule deletion."""
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE radar_keyword_chats SET sender_mode = 'all' "
+            "WHERE sender_mode = 'allowlist' AND NOT EXISTS ("
+            "  SELECT 1 FROM radar_sender_rules r "
+            "  WHERE r.keyword_id = radar_keyword_chats.keyword_id "
+            "    AND r.chat_id = radar_keyword_chats.chat_id AND r.action = 'allow')"
+        )
+        await db.commit()
+        return cur.rowcount
+
+
 async def get_sender_rules_for(keyword_id: int, chat_id: int) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
@@ -283,11 +301,15 @@ async def get_recent_trigger_senders(
     """Distinct senders who recently triggered this keyword in this chat (for the picker)."""
     async with get_db() as db:
         async with db.execute(
-            "SELECT author_id, MAX(author_name) AS author_name, "
-            "MAX(id) AS last_id, COUNT(*) AS cnt, MAX(message_url) AS last_url "
-            "FROM radar_alert_log "
-            "WHERE keyword = ? AND chat_db_id = ? AND author_id IS NOT NULL "
-            "GROUP BY author_id ORDER BY last_id DESC LIMIT ?",
+            "SELECT l.author_id, MAX(l.author_name) AS author_name, "
+            "MAX(l.id) AS last_id, COUNT(*) AS cnt, "
+            # MAX over the URL is a lexicographic max: message 9 beats 100.
+            "(SELECT l2.message_url FROM radar_alert_log l2 "
+            " WHERE l2.keyword = l.keyword AND l2.chat_db_id = l.chat_db_id "
+            "   AND l2.author_id = l.author_id ORDER BY l2.id DESC LIMIT 1) AS last_url "
+            "FROM radar_alert_log l "
+            "WHERE l.keyword = ? AND l.chat_db_id = ? AND l.author_id IS NOT NULL "
+            "GROUP BY l.author_id ORDER BY last_id DESC LIMIT ?",
             (keyword, chat_db_id, limit),
         ) as cur:
             return await cur.fetchall()
@@ -303,7 +325,10 @@ async def get_recent_senders_for_keyword(keyword_id: int, limit: int = 15) -> li
             "SELECT l.author_id, MAX(l.author_name) AS author_name, l.chat_db_id, "
             "       MAX(c.title) AS chat_title, "
             "       COALESCE(MAX(c.chat_ref), MAX(l.chat_ref)) AS chat_ref, "
-            "       COUNT(*) AS cnt, MAX(l.id) AS last_id, MAX(l.message_url) AS last_url, "
+            "       COUNT(*) AS cnt, MAX(l.id) AS last_id, "
+            "       (SELECT l2.message_url FROM radar_alert_log l2 "
+            "         WHERE l2.keyword = l.keyword AND l2.chat_db_id = l.chat_db_id "
+            "           AND l2.author_id = l.author_id ORDER BY l2.id DESC LIMIT 1) AS last_url, "
             "       MAX(r.action) AS action "
             "FROM radar_alert_log l "
             "JOIN radar_keywords k ON k.keyword = l.keyword "
@@ -378,18 +403,24 @@ async def get_muted_summary_since(days: int = 7) -> list[aiosqlite.Row]:
             "       MAX(c.title) AS chat_title, "
 "       COALESCE(MAX(c.chat_ref), MAX(l1.chat_ref)) AS chat_ref, COUNT(*) AS cnt, "
             "(SELECT l2.author_name FROM radar_alert_log l2 "
-            " WHERE l2.keyword = l1.keyword AND l2.chat_db_id = l1.chat_db_id "
+            " WHERE l2.keyword = l1.keyword AND l2.chat_db_id IS l1.chat_db_id "
+            "   AND (l2.chat_db_id IS NOT NULL OR l2.chat_ref = l1.chat_ref) "
             "   AND l2.status = 'muted' AND l2.alerted_at >= datetime('now', ?) "
             " ORDER BY l2.id DESC LIMIT 1) AS sample_author, "
             "(SELECT l2.message_url FROM radar_alert_log l2 "
-            " WHERE l2.keyword = l1.keyword AND l2.chat_db_id = l1.chat_db_id "
+            " WHERE l2.keyword = l1.keyword AND l2.chat_db_id IS l1.chat_db_id "
+            "   AND (l2.chat_db_id IS NOT NULL OR l2.chat_ref = l1.chat_ref) "
             "   AND l2.status = 'muted' AND l2.alerted_at >= datetime('now', ?) "
             " ORDER BY l2.id DESC LIMIT 1) AS sample_url "
             "FROM radar_alert_log l1 "
             "LEFT JOIN radar_keywords k ON k.keyword = l1.keyword "
             "LEFT JOIN radar_chats c ON c.id = l1.chat_db_id "
             "WHERE l1.status = 'muted' AND l1.alerted_at >= datetime('now', ?) "
-            "GROUP BY l1.keyword, l1.chat_db_id ORDER BY cnt DESC",
+            # Rows no rename ever re-keyed have a NULL chat id, which groups them
+            # all into one nameless pile; fall back to the ref they were logged under.
+            "GROUP BY l1.keyword, l1.chat_db_id, "
+            "         CASE WHEN l1.chat_db_id IS NULL THEN l1.chat_ref END "
+            "ORDER BY cnt DESC",
             (window, window, window),
         ) as cur:
             return await cur.fetchall()
@@ -474,13 +505,14 @@ async def record_seen_codes(codes: list[str], chat_ref: str, message_url: str) -
         await db.commit()
 
 
-async def count_repeat_codes(days: int) -> int:
-    """How many code sightings the dedup swallowed inside the window."""
+async def count_repeat_codes() -> int:
+    """How many code sightings the dedup swallowed, over what the table still holds.
+
+    `hits` counts a code's whole life, so it cannot be sliced by a window without
+    a per-sighting log. The retention purge is what bounds this number instead."""
     async with get_db() as db:
         async with db.execute(
-            "SELECT COALESCE(SUM(hits - 1), 0) FROM radar_seen_codes "
-            "WHERE last_seen_at >= datetime('now', ?)",
-            (f"-{days} days",),
+            "SELECT COALESCE(SUM(hits - 1), 0) FROM radar_seen_codes"
         ) as cur:
             return (await cur.fetchone())[0]
 

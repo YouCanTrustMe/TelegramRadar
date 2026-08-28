@@ -228,6 +228,7 @@ async def process_radar_message(
             {
                 "keyword": kw, "chat_ref": chat_ref_str, "author_id": author_id,
                 "message_text": text, "message_url": msg_link, "author_name": author_name,
+                "chat_db_id": chat_db_id,
             }
             for kw in passing
         ]

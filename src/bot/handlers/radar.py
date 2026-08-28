@@ -17,7 +17,6 @@ from src.bot.handlers.radar_keywords import (
 )
 from src.bot.keyboards import _back_kb
 from src.bot.state import _pending
-from src.config import settings
 from src.db.radar import (
     count_pending_alerts,
     count_repeat_codes,
@@ -82,11 +81,8 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
         pending = await count_pending_alerts()
         pending_line = f"\nAwaiting resend: <b>{pending}</b>" if pending else ""
 
-        repeats = await count_repeat_codes(settings.radar_code_dedup_days)
-        codes_line = (
-            f"\nRepeat codes silenced ({settings.radar_code_dedup_days}d): <b>{repeats}</b>"
-            if repeats else ""
-        )
+        repeats = await count_repeat_codes()
+        codes_line = f"\nRepeat codes silenced: <b>{repeats}</b>" if repeats else ""
 
         quiet_lines = ""
         silent = await get_silent_radar_chats(_SILENT_THRESHOLD_HOURS)

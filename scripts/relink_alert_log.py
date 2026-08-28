@@ -43,13 +43,18 @@ def main(args: list[str]) -> int:
         print(f"  python {Path(__file__).name} {rows[0]['chat_ref']}=<chat id>")
         return 0
 
-    total = 0
+    # Validate the whole batch first: bailing out halfway printed "✓ … N rows"
+    # for updates that were then rolled back by the missing commit.
+    pairs = []
     for arg in args:
         ref, _, id_s = arg.partition("=")
         if not id_s.isdigit() or int(id_s) not in chats:
             print(f"✗ {arg}: expected @oldref=<id of a watched chat>")
             return 1
-        entry_id = int(id_s)
+        pairs.append((ref, int(id_s)))
+
+    total = 0
+    for ref, entry_id in pairs:
         cur = db.execute(
             "UPDATE radar_alert_log SET chat_db_id = ? WHERE chat_ref = ? AND chat_db_id IS NULL",
             (entry_id, ref),
