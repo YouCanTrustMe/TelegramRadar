@@ -230,3 +230,114 @@ def match_keywords(
         if hit:
             matched.append(kw)
     return matched
+
+
+# --- code-pattern keywords ---
+
+CODE_PREFIX = "code:"
+
+# Drop codes are uppercase alphanumeric runs standing on their own: "F3QK5",
+# "XPMR4AZQH5", "EK6WCVEG2GKMFEJSD". The boundary check keeps a code out of a
+# longer word and out of the lowercase hex inside URLs.
+_CODE_TOKEN = re.compile(r"(?<![0-9A-Za-z])([0-9A-Z]{3,40})(?![0-9A-Za-z])")
+
+# A code is never posted inside a link, but percent-encoding and path segments
+# are full of short uppercase alphanumeric runs ("%202V2%20"), so links are cut
+# out of the text before the scan rather than filtered out of the results.
+_URL = re.compile(r"(?:https?://|www\.|t\.me/)\S+", re.IGNORECASE)
+
+_VOWELS = frozenset("AEIOUY")
+
+# An all-caps word without digits is only a code if its letters are too
+# consonant-heavy to be a word: "WIBUSZXBHX" is 0.20 vowels, "TOURNAMENT" 0.40.
+_MAX_VOWEL_RATIO = 0.3
+
+CODE_MIN_LEN = 3
+CODE_MAX_LEN = 40
+_MAX_CODE_LENGTHS = 8
+
+
+def parse_code_spec(spec: str) -> list[int]:
+    """Read the length spec of a code keyword into sorted lengths.
+
+    Accepts what the admin actually types: "5", "code:5", "10,17", "5-7". An
+    unusable spec yields no lengths, which makes the keyword inert rather than
+    matching everything."""
+    body = spec.strip().lower()
+    if body.startswith(CODE_PREFIX):
+        body = body[len(CODE_PREFIX):]
+    lengths: set[int] = set()
+    for part in body.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            if not (lo.isdigit() and hi.isdigit()):
+                return []
+            span = range(int(lo), int(hi) + 1)
+        elif part.isdigit():
+            span = range(int(part), int(part) + 1)
+        else:
+            return []
+        for n in span:
+            if CODE_MIN_LEN <= n <= CODE_MAX_LEN:
+                lengths.add(n)
+    return sorted(lengths)[:_MAX_CODE_LENGTHS]
+
+
+def format_code_spec(lengths: list[int]) -> str:
+    return CODE_PREFIX + ",".join(str(n) for n in lengths)
+
+
+def is_code_spec(text: str) -> bool:
+    return bool(parse_code_spec(text))
+
+
+def infer_code_lengths(text: str) -> list[int]:
+    """Work out what to watch for from pasted example codes.
+
+    Typing a length means counting characters by hand; pasting the codes
+    themselves is what an admin already has to hand. Only tokens that would pass
+    as codes are measured, so surrounding words in a copied message are ignored."""
+    lengths: set[int] = set()
+    for m in _CODE_TOKEN.finditer(_URL.sub(" ", text)):
+        token = m.group(1)
+        if CODE_MIN_LEN <= len(token) <= CODE_MAX_LEN and _looks_like_code(token):
+            lengths.add(len(token))
+    return sorted(lengths)[:_MAX_CODE_LENGTHS]
+
+
+def keyword_display(keyword: str) -> str:
+    """How a keyword should read on a button. A code keyword's spec is
+    machinery — show the shape it watches for instead."""
+    if not keyword.startswith(CODE_PREFIX):
+        return keyword
+    lengths = parse_code_spec(keyword)
+    return f"🔑{','.join(str(n) for n in lengths)}" if lengths else keyword
+
+
+def _looks_like_code(token: str) -> bool:
+    letters = [c for c in token if c.isalpha()]
+    if not letters:
+        # A bare number is a quantity, not a code — prices and counts abound.
+        return False
+    if any(c.isdigit() for c in token):
+        return True
+    vowels = sum(1 for c in letters if c in _VOWELS)
+    return vowels / len(letters) < _MAX_VOWEL_RATIO
+
+
+def find_codes(text: str, lengths: list[int]) -> list[str]:
+    """Codes of the given lengths present in the text, in order, deduplicated."""
+    if not lengths:
+        return []
+    wanted = set(lengths)
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _CODE_TOKEN.finditer(_URL.sub(" ", text)):
+        token = m.group(1)
+        if len(token) not in wanted or token in seen or not _looks_like_code(token):
+            continue
+        seen.add(token)
+        found.append(token)
+    return found

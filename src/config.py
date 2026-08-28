@@ -27,5 +27,10 @@ class Settings(BaseSettings):
     radar_match_translit: bool = True
     radar_match_merge_min_len: int = 5
 
+    # Drop codes are single-use, so a code already alerted is noise. A repeat
+    # inside this window is counted and swallowed; sightings are kept twice as
+    # long as the window so the counter survives a purge cycle.
+    radar_code_dedup_days: int = 7
+
 
 settings = Settings()

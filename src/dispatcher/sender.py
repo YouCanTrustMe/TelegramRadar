@@ -116,6 +116,17 @@ async def send_to(
                 chat_id, attempt, attempts, exc,
             )
             raise SendFailed(f"no response from Bot API: {exc!r}") from exc
+        except SendFailed:
+            raise
+        except Exception as exc:
+            # Anything else out of the client (a closed session, an OSError aiohttp
+            # did not wrap) is still a failed send. Letting it escape as itself
+            # would skip the resend queue and lose the alert outright.
+            log_transport.exception(
+                "Bot API sendMessage raised an unexpected error (chat=%s, attempt %d/%d)",
+                chat_id, attempt, attempts,
+            )
+            raise SendFailed(f"unexpected sender error: {exc!r}") from exc
 
 
 async def send_document(chat_id: int, file_path: str, filename: str | None = None) -> None:

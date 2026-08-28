@@ -4,12 +4,22 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.radar import log_radar_alert
+from src.db.radar import filter_unseen_codes, log_radar_alert, record_seen_codes
 from src.dispatcher.sender import SendFailed, send_to
-from src.radar.matcher import match_keywords
+from src.radar.matcher import find_codes, keyword_display, match_keywords, parse_code_spec
 from src.radar.pending import queue_alert
 
 log = logging.getLogger(__name__)
+
+
+# A message full of code-shaped tokens is spam, not a drop: cap what one message
+# can contribute so the dedup lookup can never build an unbounded query.
+_MAX_CODES_PER_MESSAGE = 40
+
+
+def _kind(row) -> str:
+    """Keyword rows predate the `kind` column on databases mid-migration."""
+    return row["kind"] if "kind" in row.keys() and row["kind"] else "text"
 
 
 async def process_radar_message(
@@ -43,21 +53,20 @@ async def process_radar_message(
         log.debug("Radar: msg=%s skipped — no text/caption", message.id)
         return False
 
-    chat_keywords = [row["keyword"] for row in keywords if row["id"] in linked_kw_ids]
-    if not chat_keywords:
+    linked = [row for row in keywords if row["id"] in linked_kw_ids]
+    if not linked:
         log.debug("Radar: msg=%s skipped — no keywords linked to chat db_id=%s", message.id, chat_row["id"])
         return False
+    code_rows = [row for row in linked if _kind(row) == "code"]
+    text_keywords = [row["keyword"] for row in linked if _kind(row) != "code"]
     matched = match_keywords(
         text,
-        chat_keywords,
+        text_keywords,
         leet=settings.radar_match_leet,
         fuzzy=settings.radar_match_fuzzy,
         translit=settings.radar_match_translit,
         merge_min_len=settings.radar_match_merge_min_len,
     )
-    if not matched:
-        log.debug("Radar: msg=%s skipped — no keyword match (checked: %s)", message.id, chat_keywords)
-        return False
 
     chat_id = message.chat.id
     if message.chat.username:
@@ -67,6 +76,39 @@ async def process_radar_message(
         pure_id = abs(chat_id) - 1000000000000
         msg_link = f"https://t.me/c/{pure_id}/{message.id}"
         chat_ref_str = str(chat_id)
+
+    # Code keywords match the shape of a drop code rather than a word, and a code
+    # is single-use: every sighting is remembered, and one already seen inside the
+    # dedup window is counted but never alerted again.
+    code_hits: dict[str, list[str]] = {}
+    all_codes: list[str] = []
+    for row in code_rows:
+        found = find_codes(text, parse_code_spec(row["keyword"]))[:_MAX_CODES_PER_MESSAGE]
+        if found:
+            code_hits[row["keyword"]] = found
+            all_codes.extend(found)
+    if all_codes:
+        all_codes = list(dict.fromkeys(all_codes))[:_MAX_CODES_PER_MESSAGE]
+        unseen = await filter_unseen_codes(all_codes, settings.radar_code_dedup_days)
+        await record_seen_codes(all_codes, chat_ref_str, msg_link)
+        for kw, found in code_hits.items():
+            fresh = [c for c in found if c in unseen]
+            if fresh:
+                code_hits[kw] = fresh
+                matched.append(kw)
+            else:
+                log.info(
+                    "Radar: codes already seen, not alerting keyword=%s codes=%s chat=%s msg=%s",
+                    kw, found, chat_ref_str, message.id,
+                )
+        code_hits = {kw: found for kw, found in code_hits.items() if kw in matched}
+
+    if not matched:
+        log.debug(
+            "Radar: msg=%s skipped — no keyword match (checked: %s + %d code pattern(s))",
+            message.id, text_keywords, len(code_rows),
+        )
+        return False
 
     chat_title = message.chat.title or chat_ref_str
     author = message.from_user
@@ -103,7 +145,7 @@ async def process_radar_message(
     # 'allowlist' alerts only from explicitly allowed senders. Suppressed matches
     # go to the quiet log (status='muted') instead of pinging.
     chat_db_id = chat_row["id"]
-    kw_id_by_text = {row["keyword"]: row["id"] for row in keywords if row["id"] in linked_kw_ids}
+    kw_id_by_text = {row["keyword"]: row["id"] for row in linked}
     passing: list[str] = []
     suppressed: list[str] = []
     for kw in matched:
@@ -114,7 +156,9 @@ async def process_radar_message(
         (passing if allowed else suppressed).append(kw)
 
     for kw in suppressed:
-        await log_radar_alert(kw, chat_ref_str, author_id, text, msg_link, author_name, "muted")
+        await log_radar_alert(
+            kw, chat_ref_str, author_id, text, msg_link, author_name, "muted", chat_db_id
+        )
     if suppressed:
         log.info(
             "Radar: muted keywords=%s author_id=%s chat=%s (filtered to quiet log)",
@@ -139,11 +183,27 @@ async def process_radar_message(
     else:
         chat_disp = f"<b>{escape(chat_title)}</b>"
 
-    kw_label = "Keyword" if len(passing) == 1 else "Keywords"
-    kw_str = ", ".join(escape(kw) for kw in passing)
+    passing_words = [kw for kw in passing if kw not in code_hits]
+    passing_codes: list[str] = []
+    for kw in passing:
+        for code in code_hits.get(kw, []):
+            if code not in passing_codes:
+                passing_codes.append(code)
+
+    header = ""
+    if passing_words:
+        kw_label = "Keyword" if len(passing_words) == 1 else "Keywords"
+        kw_str = ", ".join(escape(kw) for kw in passing_words)
+        header += f"🔍 {kw_label}:\n<blockquote>{kw_str}</blockquote>\n"
+    if passing_codes:
+        code_label = "Code" if len(passing_codes) == 1 else "Codes"
+        # <code> renders tap-to-copy in Telegram, which is the whole point of
+        # catching these: the code is meant to be pasted, not read.
+        codes_str = "\n".join(f"<code>{escape(c)}</code>" for c in passing_codes)
+        header += f"🔑 {code_label}:\n<blockquote>{codes_str}</blockquote>\n"
+
     alert_body = (
-        f"🔍 {kw_label}:\n"
-        f"<blockquote>{kw_str}</blockquote>\n"
+        f"{header}"
         f"💬 Chat: {chat_disp}\n"
         f"👤 From: {from_str}\n"
         f"⏱️ {ts}\n"
@@ -155,9 +215,10 @@ async def process_radar_message(
             kw_id = kw_id_by_text.get(kw)
             if kw_id is None:
                 continue
+            label = keyword_display(kw)
             keyboard.append([
-                {"text": f"🔇 {btn_sender} · {kw}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
-                {"text": f"✅👤 {btn_sender} · {kw}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
+                {"text": f"🔇 {btn_sender} · {label}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
+                {"text": f"✅👤 {btn_sender} · {label}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
             ])
     reply_markup = {"inline_keyboard": keyboard}
     try:
@@ -178,7 +239,9 @@ async def process_radar_message(
         )
         return False
     for kw in passing:
-        await log_radar_alert(kw, chat_ref_str, author_id, text, msg_link, author_name, "sent")
+        await log_radar_alert(
+            kw, chat_ref_str, author_id, text, msg_link, author_name, "sent", chat_db_id
+        )
     log.info(
         "Radar alert sent: keywords=%s chat=%s author_id=%s",
         passing,

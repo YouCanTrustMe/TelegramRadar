@@ -12,10 +12,12 @@ async def get_radar_keywords() -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
-async def add_radar_keyword(keyword: str) -> bool:
+async def add_radar_keyword(keyword: str, kind: str = "text") -> bool:
     async with get_db() as db:
         try:
-            await db.execute("INSERT INTO radar_keywords (keyword) VALUES (?)", (keyword,))
+            await db.execute(
+                "INSERT INTO radar_keywords (keyword, kind) VALUES (?, ?)", (keyword, kind)
+            )
             await db.commit()
             return True
         except aiosqlite.IntegrityError:
@@ -64,6 +66,20 @@ async def update_radar_chat_status(entry_id: int, status: str) -> None:
         await db.commit()
 
 
+async def adopt_alert_log_history(entry_id: int, chat_ref: str) -> int:
+    """Claim log rows still keyed by an old @username for this chat.
+
+    The log used to be keyed by chat_ref alone, so renaming a chat orphaned its
+    whole history from the per-chat views. Called on every rename."""
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE radar_alert_log SET chat_db_id = ? WHERE chat_ref = ? AND chat_db_id IS NULL",
+            (entry_id, chat_ref),
+        )
+        await db.commit()
+        return cur.rowcount
+
+
 async def update_radar_chat_resolved(entry_id: int, chat_id: int, chat_ref: str, title: str | None) -> None:
     async with get_db() as db:
         await db.execute(
@@ -82,13 +98,14 @@ async def log_radar_alert(
     message_url: str,
     author_name: str | None = None,
     status: str = "sent",
+    chat_db_id: int | None = None,
 ) -> None:
     async with get_db() as db:
         await db.execute(
             "INSERT INTO radar_alert_log "
-            "(keyword, chat_ref, author_id, message_text, message_url, author_name, status)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (keyword, chat_ref, author_id, message_text, message_url, author_name, status),
+            "(keyword, chat_ref, author_id, message_text, message_url, author_name, status, chat_db_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (keyword, chat_ref, author_id, message_text, message_url, author_name, status, chat_db_id),
         )
         await db.commit()
 
@@ -261,19 +278,80 @@ async def get_author_label(author_id: int) -> str | None:
 
 
 async def get_recent_trigger_senders(
-    keyword: str, chat_ref: str, limit: int = 10
+    keyword: str, chat_db_id: int, limit: int = 10
 ) -> list[aiosqlite.Row]:
     """Distinct senders who recently triggered this keyword in this chat (for the picker)."""
     async with get_db() as db:
         async with db.execute(
             "SELECT author_id, MAX(author_name) AS author_name, "
-            "MAX(id) AS last_id, COUNT(*) AS cnt "
+            "MAX(id) AS last_id, COUNT(*) AS cnt, MAX(message_url) AS last_url "
             "FROM radar_alert_log "
-            "WHERE keyword = ? AND chat_ref = ? AND author_id IS NOT NULL "
+            "WHERE keyword = ? AND chat_db_id = ? AND author_id IS NOT NULL "
             "GROUP BY author_id ORDER BY last_id DESC LIMIT ?",
-            (keyword, chat_ref, limit),
+            (keyword, chat_db_id, limit),
         ) as cur:
             return await cur.fetchall()
+
+
+async def get_recent_senders_for_keyword(keyword_id: int, limit: int = 15) -> list[aiosqlite.Row]:
+    """Who last tripped this keyword, across every chat it watches.
+
+    Answers "who am I going to hear from about this word" at the keyword itself,
+    rather than only inside one chat's filter editor."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT l.author_id, MAX(l.author_name) AS author_name, l.chat_db_id, "
+            "       MAX(c.title) AS chat_title, "
+            "       COALESCE(MAX(c.chat_ref), MAX(l.chat_ref)) AS chat_ref, "
+            "       COUNT(*) AS cnt, MAX(l.id) AS last_id, MAX(l.message_url) AS last_url, "
+            "       MAX(r.action) AS action "
+            "FROM radar_alert_log l "
+            "JOIN radar_keywords k ON k.keyword = l.keyword "
+            "JOIN radar_chats c ON c.id = l.chat_db_id "
+            "LEFT JOIN radar_sender_rules r "
+            "       ON r.keyword_id = k.id AND r.chat_id = l.chat_db_id AND r.sender_id = l.author_id "
+            "WHERE k.id = ? AND l.author_id IS NOT NULL "
+            "GROUP BY l.author_id, l.chat_db_id ORDER BY last_id DESC LIMIT ?",
+            (keyword_id, limit),
+        ) as cur:
+            return await cur.fetchall()
+
+
+# --- muted senders across every keyword and chat ---
+
+async def get_sender_rule_summary(action: str) -> list[aiosqlite.Row]:
+    """One row per sender holding rules of this action, most rules first."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT sender_id, MAX(label) AS label, COUNT(*) AS cnt, MAX(created_at) AS last_at "
+            "FROM radar_sender_rules WHERE action = ? "
+            "GROUP BY sender_id ORDER BY cnt DESC, last_at DESC",
+            (action,),
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def get_rules_for_sender(sender_id: int) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT r.*, k.keyword, c.title AS chat_title, c.chat_ref "
+            "FROM radar_sender_rules r "
+            "JOIN radar_keywords k ON k.id = r.keyword_id "
+            "JOIN radar_chats c ON c.id = r.chat_id "
+            "WHERE r.sender_id = ? ORDER BY r.action, k.keyword",
+            (sender_id,),
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def remove_sender_rules_for(sender_id: int, action: str) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM radar_sender_rules WHERE sender_id = ? AND action = ?",
+            (sender_id, action),
+        )
+        await db.commit()
+        return cur.rowcount
 
 
 # --- quiet log (suppressed matches) ---
@@ -288,21 +366,31 @@ async def get_muted_alerts(limit: int = 20) -> list[aiosqlite.Row]:
 
 
 async def get_muted_summary_since(days: int = 7) -> list[aiosqlite.Row]:
+    """Muted matches of the last N days, grouped by keyword and chat.
+
+    Grouping is on the stable chat id, not chat_ref: keyed by the @username a
+    rename split one group into two. keyword_id/chat_db_id come along so the
+    digest can offer a button straight into that group's filter editor."""
+    window = f"-{days} days"
     async with get_db() as db:
         async with db.execute(
-            "SELECT keyword, chat_ref, COUNT(*) AS cnt, "
-            "(SELECT author_name FROM radar_alert_log l2 "
-            " WHERE l2.keyword = l1.keyword AND l2.chat_ref = l1.chat_ref "
+            "SELECT l1.keyword, k.id AS keyword_id, l1.chat_db_id, "
+            "       MAX(c.title) AS chat_title, "
+"       COALESCE(MAX(c.chat_ref), MAX(l1.chat_ref)) AS chat_ref, COUNT(*) AS cnt, "
+            "(SELECT l2.author_name FROM radar_alert_log l2 "
+            " WHERE l2.keyword = l1.keyword AND l2.chat_db_id = l1.chat_db_id "
             "   AND l2.status = 'muted' AND l2.alerted_at >= datetime('now', ?) "
             " ORDER BY l2.id DESC LIMIT 1) AS sample_author, "
-            "(SELECT message_url FROM radar_alert_log l2 "
-            " WHERE l2.keyword = l1.keyword AND l2.chat_ref = l1.chat_ref "
+            "(SELECT l2.message_url FROM radar_alert_log l2 "
+            " WHERE l2.keyword = l1.keyword AND l2.chat_db_id = l1.chat_db_id "
             "   AND l2.status = 'muted' AND l2.alerted_at >= datetime('now', ?) "
             " ORDER BY l2.id DESC LIMIT 1) AS sample_url "
             "FROM radar_alert_log l1 "
-            "WHERE status = 'muted' AND alerted_at >= datetime('now', ?) "
-            "GROUP BY keyword, chat_ref ORDER BY cnt DESC",
-            (f"-{days} days", f"-{days} days", f"-{days} days"),
+            "LEFT JOIN radar_keywords k ON k.keyword = l1.keyword "
+            "LEFT JOIN radar_chats c ON c.id = l1.chat_db_id "
+            "WHERE l1.status = 'muted' AND l1.alerted_at >= datetime('now', ?) "
+            "GROUP BY l1.keyword, l1.chat_db_id ORDER BY cnt DESC",
+            (window, window, window),
         ) as cur:
             return await cur.fetchall()
 
@@ -354,3 +442,54 @@ async def defer_pending_alert(entry_id: int, delay_minutes: int, error: str) -> 
             (error[:200], f"+{delay_minutes} minutes", entry_id),
         )
         await db.commit()
+
+
+# --- seen drop codes (global dedup) ---
+
+async def filter_unseen_codes(codes: list[str], days: int) -> set[str]:
+    """Of these codes, the ones not already seen inside the dedup window."""
+    if not codes:
+        return set()
+    placeholders = ",".join("?" * len(codes))
+    async with get_db() as db:
+        async with db.execute(
+            f"SELECT code FROM radar_seen_codes WHERE code IN ({placeholders}) "
+            "AND last_seen_at >= datetime('now', ?)",
+            (*codes, f"-{days} days"),
+        ) as cur:
+            seen = {r["code"] for r in await cur.fetchall()}
+    return {c for c in codes if c not in seen}
+
+
+async def record_seen_codes(codes: list[str], chat_ref: str, message_url: str) -> None:
+    """Remember every code sighting, alerted or not, so a repost stays quiet."""
+    if not codes:
+        return
+    async with get_db() as db:
+        await db.executemany(
+            "INSERT INTO radar_seen_codes (code, chat_ref, message_url) VALUES (?, ?, ?) "
+            "ON CONFLICT(code) DO UPDATE SET hits = hits + 1, last_seen_at = datetime('now')",
+            [(c, chat_ref, message_url) for c in codes],
+        )
+        await db.commit()
+
+
+async def count_repeat_codes(days: int) -> int:
+    """How many code sightings the dedup swallowed inside the window."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(hits - 1), 0) FROM radar_seen_codes "
+            "WHERE last_seen_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def purge_seen_codes(days: int) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM radar_seen_codes WHERE last_seen_at < datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        await db.commit()
+        return cur.rowcount

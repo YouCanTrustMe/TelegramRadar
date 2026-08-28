@@ -16,8 +16,9 @@ def _radar_main_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🔇 Quiet log", callback_data="radar_muted"),
-            InlineKeyboardButton("📊 Status", callback_data="radar_status"),
+            InlineKeyboardButton("🚫 Muted senders", callback_data="rms:mute:0"),
         ],
+        [InlineKeyboardButton("📊 Status", callback_data="radar_status")],
     ])
 
 
@@ -30,6 +31,7 @@ def _radar_list_kb(
     list_cb_base: str,
     label_fn,
     view_prefix: str | None = None,
+    extra_add: tuple[str, str] | None = None,
 ) -> InlineKeyboardMarkup:
     total = len(items)
     start = page * _PAGE_SIZE
@@ -53,7 +55,10 @@ def _radar_list_kb(
             nav.append(InlineKeyboardButton("▶", callback_data=f"{list_cb_base}:{page + 1}"))
         buttons.append(nav)
 
-    buttons.append([InlineKeyboardButton("➕ Add", callback_data=add_cb)])
+    add_row = [InlineKeyboardButton("➕ Add", callback_data=add_cb)]
+    if extra_add:
+        add_row.append(InlineKeyboardButton(extra_add[0], callback_data=extra_add[1]))
+    buttons.append(add_row)
     buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_main")])
     return InlineKeyboardMarkup(buttons)
 
@@ -69,7 +74,9 @@ def _chat_label(row, kw_count: int | None = None) -> str:
 
 
 def _kw_label(row, chat_count: int | None = None) -> str:
-    base = row["keyword"]
+    keys = row.keys() if hasattr(row, "keys") else ()
+    is_code = "kind" in keys and row["kind"] == "code"
+    base = f"🔑 {row['keyword']}" if is_code else row["keyword"]
     if chat_count is None:
         return base
     return f"⚠️ {base} — unbound" if chat_count == 0 else f"{base} · {chat_count}ch"
@@ -91,6 +98,7 @@ async def _render_keywords(page: int) -> tuple[str, InlineKeyboardMarkup]:
         "radar_keywords",
         lambda r: _kw_label(r, kw_counts.get(r["id"], 0)),
         view_prefix="radar_kw_view:",
+        extra_add=("🔑 Add code", "radar_code_add"),
     )
     return text, kb
 

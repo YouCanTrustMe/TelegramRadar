@@ -4,19 +4,40 @@ import logging
 from html import escape
 
 from pyrogram import filters as pf
-from pyrogram.types import CallbackQuery, Message
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from src.bot.handlers.radar_common import _radar_list_kb, _render_keywords, _chat_label
+from src.bot.handlers.radar_common import _chat_label, _kw_label, _radar_list_kb, _render_keywords
 from src.bot.keyboards import _back_kb, _confirm_keyboard
 from src.bot.state import _pending
 from src.db.radar import (
     add_radar_keyword,
     get_chats_for_keyword,
     get_radar_keywords,
+    get_recent_senders_for_keyword,
     remove_radar_keyword,
 )
+from src.radar.matcher import format_code_spec, infer_code_lengths, parse_code_spec
 
 log = logging.getLogger(__name__)
+
+_CODE_PROMPT = (
+    "🔑 <b>Code keyword</b>\n\n"
+    "Drop codes have no fixed spelling, only a fixed length — <code>F3QK5</code> is 5, "
+    "<code>XPMR4AZQH5</code> is 10, <code>EK6WCVEG2GKMFEJSD</code> is 17.\n\n"
+    "Send either:\n"
+    "• the length — <code>5</code>, <code>5,10,17</code>, or a range <code>16-18</code>\n"
+    "• or just paste example codes and let it work the lengths out — "
+    "<code>F3QK5 R6S9A EK6WCVEG2GKMFEJSD</code>\n\n"
+    "<i>Only uppercase codes count, and each code alerts once — a repost stays quiet.</i>"
+)
+
+
+def _kw_view_kb(kw_id: int, has_history: bool):
+    rows = []
+    if has_history:
+        rows.append([InlineKeyboardButton("👥 Recent senders", callback_data=f"rk_senders:{kw_id}")])
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="radar_keywords:0")])
+    return InlineKeyboardMarkup(rows)
 
 
 def register_keywords(bot, admin_msg, admin_cb) -> None:
@@ -38,6 +59,7 @@ def register_keywords(bot, admin_msg, admin_cb) -> None:
             await query.answer("Keyword not found.", show_alert=True)
             return
         linked_chats = await get_chats_for_keyword(kw_id)
+        senders = await get_recent_senders_for_keyword(kw_id)
         if linked_chats:
             chat_lines = "\n".join(f"• {escape(_chat_label(c))}" for c in linked_chats)
             text = (
@@ -51,7 +73,14 @@ def register_keywords(bot, admin_msg, admin_cb) -> None:
                 f"⚠️ Not linked to any chat yet.\n\n"
                 f"<i>Open Chats → tap a chat → toggle this keyword on.</i>"
             )
-        await query.message.edit_text(text, reply_markup=_back_kb("radar_keywords:0"))
+        if senders:
+            text += f"\n\n👥 <b>{len(senders)}</b> recent sender(s) tripped it."
+        await query.message.edit_text(text, reply_markup=_kw_view_kb(kw_id, bool(senders)))
+
+    @bot.on_callback_query(pf.regex(r"^radar_code_add$") & admin_cb)
+    async def cb_radar_code_add(_, query: CallbackQuery) -> None:
+        _pending[query.from_user.id] = {"action": "add_radar_code", "step": 0, "data": {}}
+        await query.message.edit_text(_CODE_PROMPT, reply_markup=_back_kb("radar_keywords:0"))
 
     @bot.on_callback_query(pf.regex(r"^radar_kw_add$") & admin_cb)
     async def cb_radar_kw_add(_, query: CallbackQuery) -> None:
@@ -83,24 +112,73 @@ def register_keywords(bot, admin_msg, admin_cb) -> None:
 
 
 async def handle_keyword_input(message: Message, uid: int, text: str) -> None:
-    keyword = text.lower()
-    added = await add_radar_keyword(keyword)
-    del _pending[uid]
-    items = await get_radar_keywords()
-    if added:
-        log.info("Radar keyword added: %s", keyword)
-        header = (
-            f"✅ Added: <code>{escape(keyword)}</code>\n\n"
-            f"📋 <b>Keywords</b> ({len(items)})"
-            if items
-            else f"✅ Added: <code>{escape(keyword)}</code>\n\n📋 <b>Keywords</b>\n\nNo keywords yet."
+    """The ➕ Add flow. A bare length ("5", "10,17") is taken as a code keyword
+    even here: it is never a word worth watching, and typing the number is what
+    an admin reaches for first."""
+    await _add_keyword(message, uid, text, as_code=bool(parse_code_spec(text)))
+
+
+async def handle_code_input(message: Message, uid: int, text: str) -> None:
+    """The 🔑 Add code flow: a length spec, or example codes to measure."""
+    lengths = parse_code_spec(text)
+    examples: list[int] = []
+    if not lengths:
+        examples = infer_code_lengths(text)
+        lengths = examples
+    if not lengths:
+        _pending.pop(uid, None)
+        await message.reply(
+            f"⚠️ Could not read <code>{escape(text)}</code>.\n\n"
+            f"Send a length (<code>5</code>, <code>5,10,17</code>, <code>16-18</code>) "
+            f"or paste a few example codes.",
+            reply_markup=_back_kb("radar_keywords:0"),
         )
+        return
+    await _add_keyword(message, uid, format_code_spec(lengths), as_code=True, measured=bool(examples))
+
+
+async def _add_keyword(
+    message: Message, uid: int, text: str, *, as_code: bool, measured: bool = False
+) -> None:
+    if as_code:
+        keyword = format_code_spec(parse_code_spec(text))
+        kind = "code"
+    else:
+        keyword = text.lower()
+        kind = "text"
+    added = await add_radar_keyword(keyword, kind)
+    _pending.pop(uid, None)
+    items = await get_radar_keywords()
+    kw_row = next((k for k in items if k["keyword"] == keyword), None)
+
+    if added:
+        log.info("Radar keyword added: %s (kind=%s)", keyword, kind)
+        note = ""
+        if kind == "code":
+            lengths = parse_code_spec(keyword)
+            measured_from = " measured from your examples" if measured else ""
+            note = (
+                f"\nWatching for uppercase codes of "
+                f"{', '.join(str(n) for n in lengths)} character(s){measured_from}.\n"
+                f"<i>Link it to a chat under 🎯 Watchlist to start.</i>"
+            )
+        header = f"✅ Added: <code>{escape(keyword)}</code>{note}\n\n📋 <b>Keywords</b> ({len(items)})"
     else:
         header = f"⚠️ Already exists: <code>{escape(keyword)}</code>\n\n📋 <b>Keywords</b> ({len(items)})"
-    await message.reply(
-        header,
-        reply_markup=_radar_list_kb(
-            items, 0, "id", "radar_kw_del:", "radar_kw_add",
-            "radar_keywords", lambda r: r["keyword"],
-        ),
+
+    kb = _radar_list_kb(
+        items, 0, "id", "radar_kw_del:", "radar_kw_add",
+        "radar_keywords", _kw_label,
+        view_prefix="radar_kw_view:",
+        extra_add=("🔑 Add code", "radar_code_add"),
     )
+    # A word that already has history is worth reviewing right away: it says who
+    # is about to start pinging, without hunting through the per-chat editor.
+    if kw_row and await get_recent_senders_for_keyword(kw_row["id"], 1):
+        kb.inline_keyboard.insert(
+            0,
+            [InlineKeyboardButton(
+                "👥 Who already wrote this", callback_data=f"rk_senders:{kw_row['id']}"
+            )],
+        )
+    await message.reply(header, reply_markup=kb)

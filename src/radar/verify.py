@@ -14,7 +14,12 @@ from pyrogram.errors import (
 )
 
 from src.collectors.userbot import userbot
-from src.db.radar import get_radar_chats, update_radar_chat_resolved, update_radar_chat_status
+from src.db.radar import (
+    adopt_alert_log_history,
+    get_radar_chats,
+    update_radar_chat_resolved,
+    update_radar_chat_status,
+)
 from src.dispatcher.admin_alert import admin_alert
 
 log = logging.getLogger(__name__)
@@ -113,6 +118,14 @@ async def verify_radar_chats() -> None:
                 "Radar verify: healed entry id=%d | old_ref=%s new_ref=%s old_id=%s new_id=%s",
                 entry_id, ref, new_ref, stored_id, chat.id,
             )
+            # The log used to be keyed by @username, so a rename would otherwise
+            # orphan this chat's whole history from the per-chat views.
+            adopted = await adopt_alert_log_history(entry_id, ref)
+            if adopted:
+                log.info(
+                    "Radar verify: re-keyed %d log row(s) from %s to entry id=%d",
+                    adopted, ref, entry_id,
+                )
             await admin_alert(
                 f"ℹ️ <b>Radar chat updated</b>\n"
                 f"<code>{escape(ref)}</code> → <code>{escape(new_ref)}</code>",

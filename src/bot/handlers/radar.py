@@ -10,11 +10,17 @@ from pyrogram.types import CallbackQuery, Message
 from src.bot.handlers.radar_chats import handle_chat_input, register_chats
 from src.bot.handlers.radar_common import _radar_main_kb
 from src.bot.handlers.radar_filters import register_filters
-from src.bot.handlers.radar_keywords import handle_keyword_input, register_keywords
+from src.bot.handlers.radar_keywords import (
+    handle_code_input,
+    handle_keyword_input,
+    register_keywords,
+)
 from src.bot.keyboards import _back_kb
 from src.bot.state import _pending
+from src.config import settings
 from src.db.radar import (
     count_pending_alerts,
+    count_repeat_codes,
     get_radar_chats,
     get_radar_keywords,
     get_recent_radar_alerts,
@@ -31,6 +37,7 @@ _start_time = datetime.now(timezone.utc)
 _RADAR_INPUT_HANDLERS = {
     "add_radar_keyword": handle_keyword_input,
     "add_radar_chat": handle_chat_input,
+    "add_radar_code": handle_code_input,
 }
 
 
@@ -75,6 +82,12 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
         pending = await count_pending_alerts()
         pending_line = f"\nAwaiting resend: <b>{pending}</b>" if pending else ""
 
+        repeats = await count_repeat_codes(settings.radar_code_dedup_days)
+        codes_line = (
+            f"\nRepeat codes silenced ({settings.radar_code_dedup_days}d): <b>{repeats}</b>"
+            if repeats else ""
+        )
+
         quiet_lines = ""
         silent = await get_silent_radar_chats(_SILENT_THRESHOLD_HOURS)
         if silent:
@@ -89,6 +102,7 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
             f"Keywords active: <b>{len(keywords)}</b>\n"
             f"Uptime: <b>{hours}h {minutes}m</b>"
             f"{pending_line}"
+            f"{codes_line}"
             f"{alert_lines}"
             f"{quiet_lines}"
         )

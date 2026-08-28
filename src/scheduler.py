@@ -4,6 +4,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from src.config import settings
+from src.radar.codes import purge_stale_codes
 from src.radar.digest import send_muted_digest
 from src.radar.verify import verify_radar_chats
 
@@ -26,6 +27,15 @@ async def start_scheduler() -> None:
     )
 
     _scheduler.add_job(
+        purge_stale_codes,
+        CronTrigger(hour=4, minute=15, timezone=settings.radar_timezone),
+        id="radar_purge_codes",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    _scheduler.add_job(
         send_muted_digest,
         CronTrigger(
             day_of_week=settings.radar_digest_day,
@@ -40,6 +50,6 @@ async def start_scheduler() -> None:
 
     _scheduler.start()
     log.info(
-        "Scheduler started (radar_verify daily 03:30; muted_digest %s %02d:00 %s)",
+        "Scheduler started (radar_verify daily 03:30; purge_codes daily 04:15; muted_digest %s %02d:00 %s)",
         settings.radar_digest_day, settings.radar_digest_hour, settings.radar_timezone,
     )

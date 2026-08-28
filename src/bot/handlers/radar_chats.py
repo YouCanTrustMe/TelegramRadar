@@ -6,7 +6,13 @@ from html import escape
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from src.bot.handlers.radar_common import _PAGE_SIZE, _chat_label, _radar_list_kb, _render_chats
+from src.bot.handlers.radar_common import (
+    _PAGE_SIZE,
+    _chat_label,
+    _kw_label,
+    _radar_list_kb,
+    _render_chats,
+)
 from src.bot.keyboards import _back_kb, _confirm_keyboard
 from src.bot.state import _pending
 from src.collectors.folder_manager import RADAR_FOLDER, add_to_folder, remove_from_folder
@@ -41,7 +47,7 @@ async def _render_chat_edit(chat_id: int, page: int) -> tuple[str, InlineKeyboar
     for k in page_items:
         mark = "✅" if k["id"] in linked else "⬜"
         buttons.append([InlineKeyboardButton(
-            f"{mark} {k['keyword']}",
+            f"{mark} {_kw_label(k)}",
             callback_data=f"radar_link_toggle:{chat_id}:{k['id']}:{page}",
         )])
 
