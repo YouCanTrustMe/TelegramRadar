@@ -90,7 +90,6 @@ async def process_radar_message(
     if all_codes:
         all_codes = list(dict.fromkeys(all_codes))[:_MAX_CODES_PER_MESSAGE]
         unseen = await filter_unseen_codes(all_codes, settings.radar_code_dedup_days)
-        await record_seen_codes(all_codes, chat_ref_str, msg_link)
         for kw, found in code_hits.items():
             fresh = [c for c in found if c in unseen]
             if fresh:
@@ -154,6 +153,13 @@ async def process_radar_message(
         action = rules.get((kw_id, chat_db_id, sender_id))
         allowed = (action == "allow") if mode == "allowlist" else (action != "mute")
         (passing if allowed else suppressed).append(kw)
+
+    # A code counts as spent only once it has actually reached the admin. Marking
+    # one seen while the sender filter was swallowing it let a muted spammer burn
+    # the code for everyone: the next, legitimate poster of it said nothing.
+    delivered_codes = [c for kw in passing for c in code_hits.get(kw, [])]
+    if delivered_codes:
+        await record_seen_codes(delivered_codes, chat_ref_str, msg_link)
 
     for kw in suppressed:
         await log_radar_alert(

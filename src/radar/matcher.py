@@ -274,7 +274,10 @@ def parse_code_spec(spec: str) -> list[int]:
             lo, _, hi = part.partition("-")
             if not (lo.isdigit() and hi.isdigit()):
                 return []
-            span = range(int(lo), int(hi) + 1)
+            # Clamp before building the range, not after: "1-50000000" is two
+            # keystrokes and would otherwise materialise fifty million integers
+            # on the bot's only thread.
+            span = range(max(int(lo), CODE_MIN_LEN), min(int(hi), CODE_MAX_LEN) + 1)
         elif part.isdigit():
             span = range(int(part), int(part) + 1)
         else:

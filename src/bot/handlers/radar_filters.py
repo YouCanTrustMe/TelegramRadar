@@ -163,9 +163,15 @@ async def _render_filter_editor(chat_id: int, kw_id: int, page: int = 0) -> tupl
         if mode == "all"
         else "alert <b>only</b> from allowed senders"
     )
+    warning = ""
+    if mode == "allowlist" and not any(r["action"] == "allow" for r in rules):
+        warning = (
+            "\n⚠️ <b>Nobody is on the allowlist — this keyword alerts on nothing.</b>\n"
+            "Add a sender below, or switch back to Everyone."
+        )
     text = (
-        f"⚙️ Filter: <b>{escape(kw_row['keyword'])}</b> in {chat_disp}\n"
-        f"Mode: {mode_desc}.\n\n"
+        f"⚙️ Filter: <b>{escape(keyword_display(kw_row['keyword']))}</b> in {chat_disp}\n"
+        f"Mode: {mode_desc}.{warning}\n\n"
         f"{'Senders:' if rules else 'No sender rules yet.'}"
     )
     return text, InlineKeyboardMarkup(buttons)
@@ -309,10 +315,20 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
         kw_id, chat_id, sender_id = int(kw_s), int(chat_s), int(sender_s)
         label = await get_author_label(sender_id)
         await add_sender_rule(kw_id, chat_id, sender_id, "mute", label)
+        # Muting overwrites any allow rule this sender had; that can be the last
+        # name on the allowlist, which would leave the keyword alerting on nothing.
+        reopened = await reset_empty_allowlists([(kw_id, chat_id)])
         kw_row = await _find_keyword(kw_id)
         kw_name = keyword_display(kw_row["keyword"]) if kw_row else kw_id
-        log.info("Radar filter: muted sender=%s kw_id=%d chat_id=%d", sender_id, kw_id, chat_id)
-        await query.answer("🔇 Muted — their matches go to the quiet log", show_alert=False)
+        log.info(
+            "Radar filter: muted sender=%s kw_id=%d chat_id=%d, allowlists reopened=%d",
+            sender_id, kw_id, chat_id, reopened,
+        )
+        await query.answer(
+            "🔇 Muted — allowlist was emptied, back to everyone" if reopened
+            else "🔇 Muted — their matches go to the quiet log",
+            show_alert=bool(reopened),
+        )
         await _mark_row_done(query, kw_id, chat_id, sender_id, f"🔇 {label or sender_id} · {kw_name} ✓")
 
     @bot.on_callback_query(pf.regex(r"^ronly:\d+:\d+:-?\d+$") & admin_cb)
@@ -364,8 +380,8 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^rf_del:\d+:\d+:\d+:\d+$") & admin_cb)
     async def cb_rf_del(_, query: CallbackQuery) -> None:
         _, rule_s, chat_s, kw_s, page_s = query.data.split(":")
-        await remove_sender_rule(int(rule_s))
-        reopened = await reset_empty_allowlists()
+        emptied = await remove_sender_rule(int(rule_s))
+        reopened = await reset_empty_allowlists([emptied] if emptied else [])
         log.info("Radar filter: rule removed id=%s, allowlists reopened=%d", rule_s, reopened)
         text, kb = await _render_filter_editor(int(chat_s), int(kw_s), int(page_s))
         await query.message.edit_text(text, reply_markup=kb)
@@ -373,10 +389,18 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^rf_add:\d+:\d+:-?\d+:(allow|mute)$") & admin_cb)
     async def cb_rf_add(_, query: CallbackQuery) -> None:
         _, chat_s, kw_s, sender_s, action = query.data.split(":")
+        kw_id, chat_id = int(kw_s), int(chat_s)
         label = await get_author_label(int(sender_s))
-        await add_sender_rule(int(kw_s), int(chat_s), int(sender_s), action, label)
-        log.info("Radar filter: rule add kw_id=%s chat_id=%s sender=%s action=%s", kw_s, chat_s, sender_s, action)
-        await query.answer(f"{'✅ allowed' if action == 'allow' else '🔇 muted'}")
+        await add_sender_rule(kw_id, chat_id, int(sender_s), action, label)
+        reopened = 0 if action == "allow" else await reset_empty_allowlists([(kw_id, chat_id)])
+        log.info(
+            "Radar filter: rule add kw_id=%s chat_id=%s sender=%s action=%s allowlists_reopened=%d",
+            kw_s, chat_s, sender_s, action, reopened,
+        )
+        await query.answer(
+            "✅ allowed" if action == "allow"
+            else ("🔇 muted — allowlist was emptied, back to everyone" if reopened else "🔇 muted")
+        )
         text, kb = await _render_last10(int(chat_s), int(kw_s))
         await query.message.edit_text(text, reply_markup=kb)
 
@@ -400,11 +424,17 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
         if action == "allow":
             await set_keyword_chat_mode(kw_id, chat_id, "allowlist")
         await add_sender_rule(kw_id, chat_id, sender_id, action, label)
+        reopened = 0 if action == "allow" else await reset_empty_allowlists([(kw_id, chat_id)])
         log.info(
-            "Radar filter: rule add from keyword view kw_id=%d chat_id=%d sender=%d action=%s",
-            kw_id, chat_id, sender_id, action,
+            "Radar filter: rule add from keyword view kw_id=%d chat_id=%d sender=%d "
+            "action=%s allowlists_reopened=%d",
+            kw_id, chat_id, sender_id, action, reopened,
         )
-        await query.answer("✅ allowed — only they alert now" if action == "allow" else "🔇 muted")
+        await query.answer(
+            "✅ allowed — only they alert now" if action == "allow"
+            else ("🔇 muted — allowlist was emptied, back to everyone" if reopened else "🔇 muted"),
+            show_alert=bool(reopened),
+        )
         text, kb = await _render_keyword_senders(kw_id)
         await query.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
@@ -422,8 +452,8 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^rms_del:\d+:-?\d+$") & admin_cb)
     async def cb_rms_del(_, query: CallbackQuery) -> None:
         _, rule_s, sender_s = query.data.split(":")
-        await remove_sender_rule(int(rule_s))
-        reopened = await reset_empty_allowlists()
+        emptied = await remove_sender_rule(int(rule_s))
+        reopened = await reset_empty_allowlists([emptied] if emptied else [])
         log.info(
             "Radar filter: rule removed id=%s sender=%s, allowlists reopened=%d",
             rule_s, sender_s, reopened,
@@ -434,8 +464,8 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^rms_clear:-?\d+:(allow|mute):\d+$") & admin_cb)
     async def cb_rms_clear(_, query: CallbackQuery) -> None:
         _, sender_s, action, page_s = query.data.split(":")
-        removed = await remove_sender_rules_for(int(sender_s), action)
-        reopened = await reset_empty_allowlists()
+        removed, emptied = await remove_sender_rules_for(int(sender_s), action)
+        reopened = await reset_empty_allowlists(emptied)
         log.info(
             "Radar filter: cleared %d %s rule(s) for sender=%s, allowlists reopened=%d",
             removed, action, sender_s, reopened,

@@ -119,12 +119,16 @@ def test_seen_codes_suppress_a_repeat(db):
     run(scenario())
 
 
-def test_repeat_sightings_are_counted(db):
+def test_repeated_codes_are_counted(db):
+    """One code that keeps coming back counts once, not once per sighting."""
     async def scenario():
         await record_seen_codes(["R6S9A"], "@chat", "https://t.me/chat/1")
         assert await count_repeat_codes() == 0
         await record_seen_codes(["R6S9A"], "@chat", "https://t.me/chat/2")
         await record_seen_codes(["R6S9A"], "@other", "https://t.me/other/9")
+        assert await count_repeat_codes() == 1
+        await record_seen_codes(["F3QK5"], "@chat", "https://t.me/chat/3")
+        await record_seen_codes(["F3QK5"], "@chat", "https://t.me/chat/4")
         assert await count_repeat_codes() == 2
 
     run(scenario())
@@ -220,3 +224,15 @@ def test_inferred_lengths_then_match_those_codes():
     assert find_codes("new drop XPMR4AZQH5 and LVR41ED9DUH0UCCPT", lengths) == [
         "LVR41ED9DUH0UCCPT"
     ]
+
+
+def test_a_huge_range_is_clamped_before_it_is_built():
+    """The bounds are user input on a single-threaded bot: "1-50000000" must not
+    materialise fifty million integers before the 3..40 filter sees them."""
+    import time
+
+    from src.radar.matcher import parse_code_spec
+
+    start = time.perf_counter()
+    assert parse_code_spec("1-9999999999") == [3, 4, 5, 6, 7, 8, 9, 10]
+    assert time.perf_counter() - start < 0.5

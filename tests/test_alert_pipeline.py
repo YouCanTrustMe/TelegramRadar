@@ -179,24 +179,47 @@ def test_a_muted_sender_is_logged_quietly_with_the_chat_id(db, sent):
     assert sent == []
 
 
-def test_a_muted_code_is_still_remembered_as_seen(db, sent):
-    """Muting the sender must not turn the code into a permanent re-alert: the
-    sighting still counts, or unmuting later would ring for a spent code."""
+def test_a_muted_sender_cannot_burn_a_code_for_everyone(db, sent):
+    """A code is spent only once it has actually reached the admin. Recording it
+    while the sender filter was swallowing it let a muted spammer silence the
+    code for the next, legitimate sender too."""
     async def scenario():
         chat_row, kw_rows, linked = await _setup([("code:5", "code")])
         kw_id = kw_rows[0]["id"]
-        muted = {(kw_id, chat_row["id"], 555): "mute"}
+        spammer_muted = {(kw_id, chat_row["id"], 555): "mute"}
+
         assert await handlers.process_radar_message(
             _message("F3QK5", 1), chat_row,
-            keywords=kw_rows, linked_kw_ids=linked, rules=muted,
+            keywords=kw_rows, linked_kw_ids=linked, rules=spammer_muted,
         ) is False
-        # Same code, no mute this time — still spent.
+        assert sent == []
+
+        # Same code, a sender who is not muted: the admin has still never seen it.
         assert await handlers.process_radar_message(
             _message("F3QK5", 2), chat_row, keywords=kw_rows, linked_kw_ids=linked
-        ) is False
+        ) is True
 
     run(scenario())
-    assert sent == []
+    assert len(sent) == 1
+    assert "F3QK5" in sent[0]["text"]
+
+
+def test_a_delivered_code_is_still_spent(db, sent):
+    """The dedup must keep working for codes that did reach the admin."""
+    async def scenario():
+        chat_row, kw_rows, linked = await _setup([("code:5", "code")])
+
+        async def process(msg_id):
+            return await handlers.process_radar_message(
+                _message("F3QK5", msg_id), chat_row,
+                keywords=kw_rows, linked_kw_ids=linked,
+            )
+
+        assert await process(1) is True
+        assert await process(2) is False
+
+    run(scenario())
+    assert len(sent) == 1
 
 
 def test_the_alert_carries_a_filter_button_per_matched_keyword(db, sent):

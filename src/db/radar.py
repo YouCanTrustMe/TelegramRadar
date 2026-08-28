@@ -239,11 +239,22 @@ async def add_sender_rule(
         await db.commit()
 
 
-async def remove_sender_rule(rule_id: int) -> bool:
+async def remove_sender_rule(rule_id: int) -> tuple[int, int] | None:
+    """Deletes one rule, returning the (keyword_id, chat_id) it governed if it
+    was an allow rule — the only case that can empty an allowlist."""
     async with get_db() as db:
-        cur = await db.execute("DELETE FROM radar_sender_rules WHERE id = ?", (rule_id,))
+        async with db.execute(
+            "SELECT keyword_id, chat_id, action FROM radar_sender_rules WHERE id = ?",
+            (rule_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        await db.execute("DELETE FROM radar_sender_rules WHERE id = ?", (rule_id,))
         await db.commit()
-        return cur.rowcount > 0
+        if row["action"] != "allow":
+            return None
+        return row["keyword_id"], row["chat_id"]
 
 
 async def clear_sender_rules(keyword_id: int, chat_id: int) -> int:
@@ -256,19 +267,25 @@ async def clear_sender_rules(keyword_id: int, chat_id: int) -> int:
         return cur.rowcount
 
 
-async def reset_empty_allowlists() -> int:
-    """Put back to 'all' any keyword×chat left in allowlist mode with nobody on it.
+async def reset_empty_allowlists(pairs: list[tuple[int, int]]) -> int:
+    """Put back to 'all' those keyword×chat pairs left in allowlist mode with
+    nobody on the list — an empty allowlist alerts on nothing, silently.
 
-    An empty allowlist alerts on nothing, silently — the one filter state that
-    looks configured but reports nothing. Removing the last allow rule is how you
-    get there, so this runs after every rule deletion."""
+    Only the pairs whose last allow rule was just removed are considered. A sweep
+    over the whole table would reach keywords the admin never touched, and would
+    undo an allowlist they had only just switched on but not yet populated."""
+    if not pairs:
+        return 0
     async with get_db() as db:
         cur = await db.execute(
             "UPDATE radar_keyword_chats SET sender_mode = 'all' "
-            "WHERE sender_mode = 'allowlist' AND NOT EXISTS ("
-            "  SELECT 1 FROM radar_sender_rules r "
-            "  WHERE r.keyword_id = radar_keyword_chats.keyword_id "
-            "    AND r.chat_id = radar_keyword_chats.chat_id AND r.action = 'allow')"
+            "WHERE sender_mode = 'allowlist' "
+            f"  AND (keyword_id, chat_id) IN (VALUES {','.join(['(?,?)'] * len(pairs))}) "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM radar_sender_rules r "
+            "    WHERE r.keyword_id = radar_keyword_chats.keyword_id "
+            "      AND r.chat_id = radar_keyword_chats.chat_id AND r.action = 'allow')",
+            [v for pair in pairs for v in pair],
         )
         await db.commit()
         return cur.rowcount
@@ -369,14 +386,22 @@ async def get_rules_for_sender(sender_id: int) -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
-async def remove_sender_rules_for(sender_id: int, action: str) -> int:
+async def remove_sender_rules_for(sender_id: int, action: str) -> tuple[int, list[tuple[int, int]]]:
+    """Deletes every rule of one action for a sender. Returns how many went, and
+    the keyword×chat pairs affected when they were allow rules."""
     async with get_db() as db:
+        async with db.execute(
+            "SELECT keyword_id, chat_id FROM radar_sender_rules "
+            "WHERE sender_id = ? AND action = ?",
+            (sender_id, action),
+        ) as cur:
+            pairs = [(r["keyword_id"], r["chat_id"]) for r in await cur.fetchall()]
         cur = await db.execute(
             "DELETE FROM radar_sender_rules WHERE sender_id = ? AND action = ?",
             (sender_id, action),
         )
         await db.commit()
-        return cur.rowcount
+        return cur.rowcount, (pairs if action == "allow" else [])
 
 
 # --- quiet log (suppressed matches) ---
@@ -506,13 +531,14 @@ async def record_seen_codes(codes: list[str], chat_ref: str, message_url: str) -
 
 
 async def count_repeat_codes() -> int:
-    """How many code sightings the dedup swallowed, over what the table still holds.
+    """How many distinct codes the dedup has silenced at least one repeat of.
 
-    `hits` counts a code's whole life, so it cannot be sliced by a window without
-    a per-sighting log. The retention purge is what bounds this number instead."""
+    Counting sightings instead would never stop growing: a code that keeps being
+    reposted keeps refreshing its own `last_seen_at`, so retention never retires
+    it and its `hits` climbs forever. Counting codes is bounded by the table."""
     async with get_db() as db:
         async with db.execute(
-            "SELECT COALESCE(SUM(hits - 1), 0) FROM radar_seen_codes"
+            "SELECT COUNT(*) FROM radar_seen_codes WHERE hits > 1"
         ) as cur:
             return (await cur.fetchone())[0]
 

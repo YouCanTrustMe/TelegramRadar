@@ -133,8 +133,9 @@ def test_removing_the_last_allowed_sender_reopens_the_keyword(db):
         await set_keyword_chat_mode(kw_row["id"], chat["id"], "allowlist")
         await add_sender_rule(kw_row["id"], chat["id"], 7, "allow", "Ann")
 
-        assert await remove_sender_rules_for(7, "allow") == 1
-        assert await reset_empty_allowlists() == 1
+        removed, emptied = await remove_sender_rules_for(7, "allow")
+        assert removed == 1
+        assert await reset_empty_allowlists(emptied) == 1
         modes = await get_keyword_chat_modes()
         assert modes[(kw_row["id"], chat["id"])] == "all"
 
@@ -147,10 +148,10 @@ def test_an_allowlist_that_still_has_someone_is_left_alone(db):
         await set_keyword_chat_mode(kw_row["id"], chat["id"], "allowlist")
         await add_sender_rule(kw_row["id"], chat["id"], 7, "allow", "Ann")
         await add_sender_rule(kw_row["id"], chat["id"], 8, "allow", "Bob")
-        rules_removed = await remove_sender_rules_for(7, "allow")
+        removed, emptied = await remove_sender_rules_for(7, "allow")
 
-        assert rules_removed == 1
-        assert await reset_empty_allowlists() == 0
+        assert removed == 1
+        assert await reset_empty_allowlists(emptied) == 0
         modes = await get_keyword_chat_modes()
         assert modes[(kw_row["id"], chat["id"])] == "allowlist"
 
@@ -163,9 +164,10 @@ def test_a_mute_only_sender_never_reopens_an_allowlist(db):
         await set_keyword_chat_mode(kw_row["id"], chat["id"], "allowlist")
         await add_sender_rule(kw_row["id"], chat["id"], 7, "allow", "Ann")
         await add_sender_rule(kw_row["id"], chat["id"], 8, "mute", "Bob")
-        await remove_sender_rules_for(8, "mute")
+        removed, emptied = await remove_sender_rules_for(8, "mute")
 
-        assert await reset_empty_allowlists() == 0
+        assert (removed, emptied) == (1, [])
+        assert await reset_empty_allowlists(emptied) == 0
 
     run(scenario())
 
@@ -202,7 +204,108 @@ def test_a_deleted_rule_reopens_an_emptied_allowlist(db):
         from src.db.radar import get_sender_rules_for
 
         rule = (await get_sender_rules_for(kw_row["id"], chat["id"]))[0]
-        await remove_sender_rule(rule["id"])
-        assert await reset_empty_allowlists() == 1
+        emptied = await remove_sender_rule(rule["id"])
+        assert emptied == (kw_row["id"], chat["id"])
+        assert await reset_empty_allowlists([emptied]) == 1
+
+    run(scenario())
+
+
+def test_deleting_a_mute_never_reopens_the_allowlist_you_just_set(db):
+    """Switching a keyword to Allowlist and then clearing a leftover mute must
+    not silently undo the switch before anyone has been allowed yet."""
+
+    async def scenario():
+        chat, kw_row = await _chat_and_keyword()
+        await set_keyword_chat_mode(kw_row["id"], chat["id"], "allowlist")
+        await add_sender_rule(kw_row["id"], chat["id"], 8, "mute", "Bob")
+        from src.db.radar import get_sender_rules_for
+
+        rule = (await get_sender_rules_for(kw_row["id"], chat["id"]))[0]
+        emptied = await remove_sender_rule(rule["id"])
+
+        assert emptied is None
+        assert await reset_empty_allowlists([emptied] if emptied else []) == 0
+        modes = await get_keyword_chat_modes()
+        assert modes[(kw_row["id"], chat["id"])] == "allowlist"
+
+    run(scenario())
+
+
+def test_clearing_one_keyword_leaves_other_keywords_alone(db):
+    """The reset must reach only the pairs whose allow rule was just removed."""
+
+    async def scenario():
+        chat, kw_a = await _chat_and_keyword("golden")
+        await add_radar_keyword("meta")
+        kw_b = next(k for k in await get_radar_keywords() if k["keyword"] == "meta")
+        await link_keyword_chat(kw_b["id"], chat["id"])
+
+        # Both on an allowlist; only one of them has anybody on it.
+        for kw in (kw_a, kw_b):
+            await set_keyword_chat_mode(kw["id"], chat["id"], "allowlist")
+        await add_sender_rule(kw_a["id"], chat["id"], 7, "allow", "Ann")
+
+        removed, emptied = await remove_sender_rules_for(7, "allow")
+        assert (removed, emptied) == (1, [(kw_a["id"], chat["id"])])
+        assert await reset_empty_allowlists(emptied) == 1
+
+        modes = await get_keyword_chat_modes()
+        assert modes[(kw_a["id"], chat["id"])] == "all"
+        # meta was never touched, so its (empty) allowlist is left as the admin left it.
+        assert modes[(kw_b["id"], chat["id"])] == "allowlist"
+
+    run(scenario())
+
+
+def test_a_recurring_code_cannot_inflate_the_counter(db):
+    """Counting sightings grew without bound: a reposted code refreshes its own
+    last_seen_at, so retention never retires it."""
+
+    async def scenario():
+        from src.db.radar import count_repeat_codes, record_seen_codes
+
+        for i in range(200):
+            await record_seen_codes(["SPAMCODE1"], "@c", f"https://t.me/c/{i}")
+        assert await count_repeat_codes() == 1
+
+        await record_seen_codes(["OTHERCODE"], "@c", "https://t.me/c/x")
+        assert await count_repeat_codes() == 1
+        await record_seen_codes(["OTHERCODE"], "@c", "https://t.me/c/y")
+        assert await count_repeat_codes() == 2
+
+    run(scenario())
+
+
+def test_muting_the_last_allowed_sender_reopens_the_keyword(db):
+    """Muting overwrites that sender's allow rule, which can empty the allowlist
+    just as deleting it would — every add path needs the same guard."""
+
+    async def scenario():
+        chat, kw_row = await _chat_and_keyword()
+        await set_keyword_chat_mode(kw_row["id"], chat["id"], "allowlist")
+        await add_sender_rule(kw_row["id"], chat["id"], 7, "allow", "Ann")
+
+        await add_sender_rule(kw_row["id"], chat["id"], 7, "mute", "Ann")
+        assert await reset_empty_allowlists([(kw_row["id"], chat["id"])]) == 1
+
+        modes = await get_keyword_chat_modes()
+        assert modes[(kw_row["id"], chat["id"])] == "all"
+
+    run(scenario())
+
+
+def test_muting_one_of_several_allowed_senders_keeps_the_allowlist(db):
+    async def scenario():
+        chat, kw_row = await _chat_and_keyword()
+        await set_keyword_chat_mode(kw_row["id"], chat["id"], "allowlist")
+        await add_sender_rule(kw_row["id"], chat["id"], 7, "allow", "Ann")
+        await add_sender_rule(kw_row["id"], chat["id"], 8, "allow", "Bob")
+
+        await add_sender_rule(kw_row["id"], chat["id"], 7, "mute", "Ann")
+        assert await reset_empty_allowlists([(kw_row["id"], chat["id"])]) == 0
+
+        modes = await get_keyword_chat_modes()
+        assert modes[(kw_row["id"], chat["id"])] == "allowlist"
 
     run(scenario())
