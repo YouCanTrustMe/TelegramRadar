@@ -15,10 +15,9 @@ def _radar_main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎯 Watchlist", callback_data="radar_chats:0"),
         ],
         [
-            InlineKeyboardButton("🔇 Quiet log", callback_data="radar_muted"),
-            InlineKeyboardButton("🚫 Muted senders", callback_data="rms:mute:0"),
+            InlineKeyboardButton("🔇 Quiet", callback_data="radar_quiet"),
+            InlineKeyboardButton("📊 Status", callback_data="radar_status"),
         ],
-        [InlineKeyboardButton("📊 Status", callback_data="radar_status")],
     ])
 
 

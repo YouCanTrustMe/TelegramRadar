@@ -8,8 +8,12 @@ from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, Message
 
 from src.bot.handlers.radar_chats import handle_chat_input, register_chats
-from src.bot.handlers.radar_common import _radar_main_kb
-from src.bot.handlers.radar_filters import register_filters
+from src.bot.handlers.radar_common import (
+    _radar_main_kb,
+    _render_chats,
+    _render_keywords,
+)
+from src.bot.handlers.radar_filters import register_filters, render_quiet_hub
 from src.bot.handlers.radar_keywords import (
     handle_code_input,
     handle_keyword_input,
@@ -40,6 +44,50 @@ _RADAR_INPUT_HANDLERS = {
 }
 
 
+async def _render_status() -> str:
+    chats = await get_radar_chats()
+    keywords = await get_radar_keywords()
+    alerts = await get_recent_radar_alerts(3)
+
+    delta = datetime.now(timezone.utc) - _start_time
+    hours, rem = divmod(int(delta.total_seconds()), 3600)
+    minutes = rem // 60
+
+    alert_lines = ""
+    if alerts:
+        alert_lines = "\n\n<b>Last alerts:</b>\n" + "\n".join(
+            f"• \"{escape(r['keyword'])}\" in {escape(r['chat_ref'])} — {r['alerted_at'][:16]}"
+            f"{_STATUS_MARK.get(r['status'], '')}"
+            for r in alerts
+        )
+
+    pending = await count_pending_alerts()
+    pending_line = f"\nAwaiting resend: <b>{pending}</b>" if pending else ""
+
+    repeats = await count_repeat_codes()
+    codes_line = f"\nRepeat codes silenced: <b>{repeats}</b>" if repeats else ""
+
+    quiet_lines = ""
+    silent = await get_silent_radar_chats(_SILENT_THRESHOLD_HOURS)
+    if silent:
+        quiet_lines = f"\n\n<b>Quiet chats (>{_SILENT_THRESHOLD_HOURS}h):</b>\n" + "\n".join(
+            f"• {escape(r['title'] or r['chat_ref'])} — {r['hours_silent']}h"
+            for r in silent
+        )
+
+    text = (
+        f"📊 <b>Radar Status</b>\n\n"
+        f"Chats monitored: <b>{len(chats)}</b>\n"
+        f"Keywords active: <b>{len(keywords)}</b>\n"
+        f"Uptime: <b>{hours}h {minutes}m</b>"
+        f"{pending_line}"
+        f"{codes_line}"
+        f"{alert_lines}"
+        f"{quiet_lines}"
+    )
+    return text
+
+
 def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
     register_keywords(bot, admin_msg, admin_cb)
     register_chats(bot, admin_msg, admin_cb)
@@ -62,47 +110,33 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_callback_query(pf.regex(r"^radar_status$") & admin_cb)
     async def cb_radar_status(_, query: CallbackQuery) -> None:
-        chats = await get_radar_chats()
-        keywords = await get_radar_keywords()
-        alerts = await get_recent_radar_alerts(3)
+        await query.message.edit_text(await _render_status(), reply_markup=_back_kb("radar_main"))
 
-        delta = datetime.now(timezone.utc) - _start_time
-        hours, rem = divmod(int(delta.total_seconds()), 3600)
-        minutes = rem // 60
+    # Each command opens a screen that already exists — the "/" menu is the bot's
+    # table of contents, not a second way to do things.
+    @bot.on_message(pf.command("keywords") & admin_msg)
+    async def cmd_keywords(_, message: Message) -> None:
+        _pending.pop(message.from_user.id, None)
+        text, kb = await _render_keywords(0)
+        await message.reply(text, reply_markup=kb)
 
-        alert_lines = ""
-        if alerts:
-            alert_lines = "\n\n<b>Last alerts:</b>\n" + "\n".join(
-                f"• \"{escape(r['keyword'])}\" in {escape(r['chat_ref'])} — {r['alerted_at'][:16]}"
-                f"{_STATUS_MARK.get(r['status'], '')}"
-                for r in alerts
-            )
+    @bot.on_message(pf.command("chats") & admin_msg)
+    async def cmd_chats(_, message: Message) -> None:
+        _pending.pop(message.from_user.id, None)
+        text, kb = await _render_chats(0)
+        await message.reply(text, reply_markup=kb)
 
-        pending = await count_pending_alerts()
-        pending_line = f"\nAwaiting resend: <b>{pending}</b>" if pending else ""
+    @bot.on_message(pf.command("quiet") & admin_msg)
+    async def cmd_quiet(_, message: Message) -> None:
+        _pending.pop(message.from_user.id, None)
+        text, kb = await render_quiet_hub()
+        await message.reply(text, reply_markup=kb)
 
-        repeats = await count_repeat_codes()
-        codes_line = f"\nRepeat codes silenced: <b>{repeats}</b>" if repeats else ""
+    @bot.on_message(pf.command("status") & admin_msg)
+    async def cmd_status(_, message: Message) -> None:
+        _pending.pop(message.from_user.id, None)
+        await message.reply(await _render_status(), reply_markup=_back_kb("radar_main"))
 
-        quiet_lines = ""
-        silent = await get_silent_radar_chats(_SILENT_THRESHOLD_HOURS)
-        if silent:
-            quiet_lines = f"\n\n<b>Quiet chats (>{_SILENT_THRESHOLD_HOURS}h):</b>\n" + "\n".join(
-                f"• {escape(r['title'] or r['chat_ref'])} — {r['hours_silent']}h"
-                for r in silent
-            )
-
-        text = (
-            f"📊 <b>Radar Status</b>\n\n"
-            f"Chats monitored: <b>{len(chats)}</b>\n"
-            f"Keywords active: <b>{len(keywords)}</b>\n"
-            f"Uptime: <b>{hours}h {minutes}m</b>"
-            f"{pending_line}"
-            f"{codes_line}"
-            f"{alert_lines}"
-            f"{quiet_lines}"
-        )
-        await query.message.edit_text(text, reply_markup=_back_kb("radar_main"))
 
     @bot.on_message(pf.private & admin_msg, group=1)
     async def handle_radar_conversation(_, message: Message) -> None:

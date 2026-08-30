@@ -415,6 +415,14 @@ async def get_muted_alerts(limit: int = 20) -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
+async def get_muted_alerts_count() -> int:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM radar_alert_log WHERE status = 'muted'"
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+
 async def get_muted_summary_since(days: int = 7) -> list[aiosqlite.Row]:
     """Muted matches of the last N days, grouped by keyword and chat.
 

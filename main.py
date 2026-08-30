@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pyrogram import idle
 
-from src.bot.commands import register_commands
+from src.bot.commands import publish_command_menu, register_commands
 from src.collectors.radar_collector import run_radar_collector
 from src.collectors.userbot import keep_userbot_online, userbot
 from src.db.base import init_db
@@ -52,6 +52,8 @@ async def main() -> None:
     await bot.start()
     await userbot.start()
     log.info("Clients started")
+
+    await publish_command_menu()
 
     try:
         await verify_radar_chats()

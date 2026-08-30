@@ -17,6 +17,7 @@ from src.db.radar import (
     clear_sender_rules,
     get_author_label,
     get_blocked_codes,
+    get_muted_alerts_count,
     get_keyword_chat_modes,
     get_keyword_ids_for_chat,
     get_muted_alerts,
@@ -110,6 +111,27 @@ async def _render_muted() -> str:
     return f"🔇 <b>Quiet log</b> (last {len(rows)} muted)\n\n" + "\n".join(lines)
 
 
+async def render_quiet_hub() -> tuple[str, InlineKeyboardMarkup]:
+    """Suppressed matches, muted senders and blocked codes are three answers to
+    one question — what is the radar not telling me — so they share a screen."""
+    muted = await get_muted_alerts_count()
+    senders = len(await get_sender_rule_summary("mute"))
+    codes = len(await get_blocked_codes())
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📋 Suppressed matches ({muted})", callback_data="radar_muted")],
+        [InlineKeyboardButton(f"🚫 Muted senders ({senders})", callback_data="rms:mute:0")],
+        [InlineKeyboardButton(f"🔑 Blocked codes ({codes})", callback_data="rcblocked")],
+        [InlineKeyboardButton("◀ Back", callback_data="radar_main")],
+    ])
+    text = (
+        "🔇 <b>Quiet</b> — what the radar is holding back\n\n"
+        "📋 matches hidden by a sender filter\n"
+        "🚫 senders muted for a keyword\n"
+        "🔑 tokens that looked like a code but were not"
+    )
+    return text, kb
+
+
 async def _render_blocked_codes() -> tuple[str, InlineKeyboardMarkup]:
     rows = await get_blocked_codes()
     buttons = [
@@ -119,7 +141,7 @@ async def _render_blocked_codes() -> tuple[str, InlineKeyboardMarkup]:
         ]
         for r in rows[:_BLOCKED_CODES_LIMIT]
     ]
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_muted")])
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_quiet")])
     if rows:
         text = (
             f"🚫 <b>Blocked codes</b> ({len(rows)})\n\n"
@@ -316,7 +338,7 @@ async def _render_sender_list(action: str, page: int) -> tuple[str, InlineKeyboa
     other = "allow" if action == "mute" else "mute"
     other_icon, other_title = _ACTION_TITLE[other]
     buttons.append([InlineKeyboardButton(f"{other_icon} {other_title}", callback_data=f"rms:{other}:0")])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_main")])
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_quiet")])
 
     if rows:
         text = (
@@ -390,13 +412,16 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_callback_query(pf.regex(r"^radar_muted$") & admin_cb)
     async def cb_radar_muted(_, query: CallbackQuery) -> None:
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚫 Blocked codes", callback_data="rcblocked")],
-            [InlineKeyboardButton("◀ Back", callback_data="radar_main")],
-        ])
         await query.message.edit_text(
-            await _render_muted(), reply_markup=kb, disable_web_page_preview=True
+            await _render_muted(),
+            reply_markup=_back_kb("radar_quiet"),
+            disable_web_page_preview=True,
         )
+
+    @bot.on_callback_query(pf.regex(r"^radar_quiet$") & admin_cb)
+    async def cb_radar_quiet(_, query: CallbackQuery) -> None:
+        text, kb = await render_quiet_hub()
+        await query.message.edit_text(text, reply_markup=kb)
 
     @bot.on_callback_query(pf.regex(r"^rcblocked$") & admin_cb)
     async def cb_rcblocked(_, query: CallbackQuery) -> None:
