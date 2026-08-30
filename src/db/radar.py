@@ -503,18 +503,19 @@ async def defer_pending_alert(entry_id: int, delay_minutes: int, error: str) -> 
 # --- seen drop codes (global dedup) ---
 
 async def filter_unseen_codes(codes: list[str], days: int) -> set[str]:
-    """Of these codes, the ones not already seen inside the dedup window."""
+    """Of these codes, the ones worth alerting on: not seen inside the dedup
+    window, and not blocked outright as never having been a code."""
     if not codes:
         return set()
     placeholders = ",".join("?" * len(codes))
     async with get_db() as db:
         async with db.execute(
             f"SELECT code FROM radar_seen_codes WHERE code IN ({placeholders}) "
-            "AND last_seen_at >= datetime('now', ?)",
+            "AND (blocked = 1 OR last_seen_at >= datetime('now', ?))",
             (*codes, f"-{days} days"),
         ) as cur:
-            seen = {r["code"] for r in await cur.fetchall()}
-    return {c for c in codes if c not in seen}
+            skip = {r["code"] for r in await cur.fetchall()}
+    return {c for c in codes if c not in skip}
 
 
 async def record_seen_codes(codes: list[str], chat_ref: str, message_url: str) -> None:
@@ -544,10 +545,48 @@ async def count_repeat_codes() -> int:
 
 
 async def purge_seen_codes(days: int) -> int:
+    """Retire stale sightings. A blocked code is kept: dropping it would let the
+    thing the admin said is not a code start alerting again."""
     async with get_db() as db:
         cur = await db.execute(
-            "DELETE FROM radar_seen_codes WHERE last_seen_at < datetime('now', ?)",
+            "DELETE FROM radar_seen_codes "
+            "WHERE blocked = 0 AND last_seen_at < datetime('now', ?)",
             (f"-{days} days",),
         )
         await db.commit()
         return cur.rowcount
+
+
+async def block_code(code: str) -> None:
+    """Mark a token as never having been a code. Blocking one the radar has not
+    recorded yet still works, so the block can precede the sighting."""
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO radar_seen_codes (code, blocked, hits) VALUES (?, 1, 0) "
+            "ON CONFLICT(code) DO UPDATE SET blocked = 1",
+            (code,),
+        )
+        await db.commit()
+
+
+async def unblock_code(code: str) -> bool:
+    """Forget the token entirely rather than just clearing the flag.
+
+    Blocking writes a row whose `last_seen_at` is the moment of the block, so
+    merely un-flagging it would leave the dedup window suppressing a code the
+    admin has just asked to hear about again — and may never have been shown."""
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM radar_seen_codes WHERE code = ? AND blocked = 1", (code,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_blocked_codes() -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT code, chat_ref, hits, last_seen_at FROM radar_seen_codes "
+            "WHERE blocked = 1 ORDER BY last_seen_at DESC"
+        ) as cur:
+            return await cur.fetchall()

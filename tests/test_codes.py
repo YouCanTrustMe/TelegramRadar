@@ -236,3 +236,72 @@ def test_a_huge_range_is_clamped_before_it_is_built():
     start = time.perf_counter()
     assert parse_code_spec("1-9999999999") == [3, 4, 5, 6, 7, 8, 9, 10]
     assert time.perf_counter() - start < 0.5
+
+
+def test_a_blocked_code_never_alerts_again(db):
+    """A token that only looks like a code is blocked by value: muting its sender
+    is not an option when that sender also posts the genuine ones."""
+
+    async def scenario():
+        from src.db.radar import block_code
+
+        await block_code("10LVL")
+        assert await filter_unseen_codes(["10LVL"], 7) == set()
+        # Still blocked long after the dedup window would have expired.
+        await _backdate("10LVL", 400)
+        assert await filter_unseen_codes(["10LVL"], 7) == set()
+        # Real codes alongside it are unaffected.
+        assert await filter_unseen_codes(["10LVL", "F3QK5"], 7) == {"F3QK5"}
+
+    run(scenario())
+
+
+def test_blocking_survives_the_purge(db):
+    async def scenario():
+        from src.db.radar import block_code, get_blocked_codes
+
+        await record_seen_codes(["10LVL", "F3QK5"], "@c", "https://t.me/c/1")
+        await block_code("10LVL")
+        await _backdate("10LVL", 400)
+        await _backdate("F3QK5", 400)
+
+        assert await purge_seen_codes(14) == 1
+        assert [r["code"] for r in await get_blocked_codes()] == ["10LVL"]
+        assert await filter_unseen_codes(["10LVL"], 7) == set()
+
+    run(scenario())
+
+
+def test_a_code_can_be_blocked_before_it_is_ever_seen(db):
+    async def scenario():
+        from src.db.radar import block_code, get_blocked_codes
+
+        await block_code("NEVER1")
+        assert [r["code"] for r in await get_blocked_codes()] == ["NEVER1"]
+        assert await filter_unseen_codes(["NEVER1"], 7) == set()
+
+    run(scenario())
+
+
+def test_unblocking_lets_a_code_alert_again(db):
+    async def scenario():
+        from src.db.radar import block_code, get_blocked_codes, unblock_code
+
+        await block_code("10LVL")
+        assert await unblock_code("10LVL") is True
+        assert await get_blocked_codes() == []
+        assert await filter_unseen_codes(["10LVL"], 7) == {"10LVL"}
+        # Unblocking something that was not blocked is a no-op, not an error.
+        assert await unblock_code("10LVL") is False
+
+    run(scenario())
+
+
+def test_blocking_does_not_disturb_the_repeat_counter(db):
+    async def scenario():
+        from src.db.radar import block_code
+
+        await block_code("10LVL")
+        assert await count_repeat_codes() == 0
+
+    run(scenario())

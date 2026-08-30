@@ -226,6 +226,14 @@ async def process_radar_message(
                 {"text": f"🔇 {btn_sender} · {label}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
                 {"text": f"✅👤 {btn_sender} · {label}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
             ])
+    # A shape heuristic cannot tell "10LVL" out of "6-10LVL FaceIT" from a real
+    # five-character code, and muting the sender is wrong here — the channel that
+    # posts the false positives is the same one that posts genuine codes. So the
+    # escape hatch is per code value.
+    for code in passing_codes:
+        keyboard.append([
+            {"text": f"🚫 Not a code · {code}", "callback_data": f"rcblk:{code}"}
+        ])
     reply_markup = {"inline_keyboard": keyboard}
     try:
         await send_to(settings.telegram_admin_id, alert_body, reply_markup=reply_markup)

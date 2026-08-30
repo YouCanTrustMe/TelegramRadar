@@ -13,8 +13,10 @@ from src.bot.keyboards import _back_kb
 from src.collectors.userbot import userbot
 from src.db.radar import (
     add_sender_rule,
+    block_code,
     clear_sender_rules,
     get_author_label,
+    get_blocked_codes,
     get_keyword_chat_modes,
     get_keyword_ids_for_chat,
     get_muted_alerts,
@@ -29,6 +31,7 @@ from src.db.radar import (
     remove_sender_rules_for,
     reset_empty_allowlists,
     set_keyword_chat_mode,
+    unblock_code,
 )
 from src.radar.matcher import keyword_display
 
@@ -39,6 +42,7 @@ _RECENT_SENDERS_LIMIT = 10
 _KEYWORD_SENDERS_LIMIT = 15
 _RULES_PER_PAGE = 8
 _SENDERS_PER_PAGE = 8
+_BLOCKED_CODES_LIMIT = 30
 
 _ACTION_TITLE = {"mute": ("🚫", "Muted senders"), "allow": ("✅", "Allowed senders")}
 
@@ -76,6 +80,21 @@ async def _mark_row_done(
         log.debug("mark_row_done: could not edit markup: %s", exc)
 
 
+async def _replace_button(query: CallbackQuery, callback_data: str, text: str) -> None:
+    """Swap one button for a confirmation, leaving the rest of the alert live."""
+    markup = query.message.reply_markup
+    rows = [
+        [InlineKeyboardButton(text, callback_data="noop")]
+        if any(b.callback_data == callback_data for b in row)
+        else row
+        for row in (markup.inline_keyboard if markup else [])
+    ]
+    try:
+        await query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+    except Exception as exc:
+        log.debug("replace_button: could not edit markup: %s", exc)
+
+
 async def _render_muted() -> str:
     rows = await get_muted_alerts(_MUTED_VIEW_LIMIT)
     if not rows:
@@ -89,6 +108,31 @@ async def _render_muted() -> str:
             f"{who} — {r['alerted_at'][:16]}{link}"
         )
     return f"🔇 <b>Quiet log</b> (last {len(rows)} muted)\n\n" + "\n".join(lines)
+
+
+async def _render_blocked_codes() -> tuple[str, InlineKeyboardMarkup]:
+    rows = await get_blocked_codes()
+    buttons = [
+        [
+            InlineKeyboardButton(f"🚫 {r['code']}", callback_data="noop"),
+            InlineKeyboardButton("❌", callback_data=f"rcunblk:{r['code']}"),
+        ]
+        for r in rows[:_BLOCKED_CODES_LIMIT]
+    ]
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_muted")])
+    if rows:
+        text = (
+            f"🚫 <b>Blocked codes</b> ({len(rows)})\n\n"
+            f"Tokens that look like a code but never were. They never alert again.\n"
+            f"❌ removes the block."
+        )
+    else:
+        text = (
+            "🚫 <b>Blocked codes</b>\n\nNothing blocked.\n\n"
+            "<i>Use “🚫 Not a code” on a code alert when the radar catches "
+            "something that only looks like one.</i>"
+        )
+    return text, InlineKeyboardMarkup(buttons)
 
 
 async def _find_chat(chat_id: int):
@@ -346,9 +390,35 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_callback_query(pf.regex(r"^radar_muted$") & admin_cb)
     async def cb_radar_muted(_, query: CallbackQuery) -> None:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚫 Blocked codes", callback_data="rcblocked")],
+            [InlineKeyboardButton("◀ Back", callback_data="radar_main")],
+        ])
         await query.message.edit_text(
-            await _render_muted(), reply_markup=_back_kb("radar_main"), disable_web_page_preview=True
+            await _render_muted(), reply_markup=kb, disable_web_page_preview=True
         )
+
+    @bot.on_callback_query(pf.regex(r"^rcblocked$") & admin_cb)
+    async def cb_rcblocked(_, query: CallbackQuery) -> None:
+        text, kb = await _render_blocked_codes()
+        await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^rcblk:[0-9A-Z]{3,40}$") & admin_cb)
+    async def cb_rcblk(_, query: CallbackQuery) -> None:
+        code = query.data.split(":", 1)[1]
+        await block_code(code)
+        log.info("Radar codes: blocked code=%s", code)
+        await query.answer(f"🚫 {code} will never alert again")
+        await _replace_button(query, query.data, f"🚫 {code} ✓")
+
+    @bot.on_callback_query(pf.regex(r"^rcunblk:[0-9A-Z]{3,40}$") & admin_cb)
+    async def cb_rcunblk(_, query: CallbackQuery) -> None:
+        code = query.data.split(":", 1)[1]
+        removed = await unblock_code(code)
+        log.info("Radar codes: unblocked code=%s removed=%s", code, removed)
+        await query.answer(f"{code} unblocked" if removed else "Not blocked")
+        text, kb = await _render_blocked_codes()
+        await query.message.edit_text(text, reply_markup=kb)
 
     @bot.on_callback_query(pf.regex(r"^rf_chat:\d+$") & admin_cb)
     async def cb_rf_chat(_, query: CallbackQuery) -> None:

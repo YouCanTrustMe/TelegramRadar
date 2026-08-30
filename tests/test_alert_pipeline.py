@@ -230,3 +230,43 @@ def test_the_alert_carries_a_filter_button_per_matched_keyword(db, sent):
     assert rows[0][0]["url"].endswith("/keydropchat/100")
     mutes = [b["callback_data"] for r in rows[1:] for b in r if b["callback_data"].startswith("rmute:")]
     assert len(mutes) == 2
+
+
+def test_a_code_alert_offers_a_block_button(db, sent):
+    assert run(_process("GOLDEN CODE - LVR41ED9DUH0UCCPT", [("code:17", "code")]))
+    rows = sent[0]["reply_markup"]["inline_keyboard"]
+    blocks = [b for r in rows for b in r if b.get("callback_data", "").startswith("rcblk:")]
+    assert [b["callback_data"] for b in blocks] == ["rcblk:LVR41ED9DUH0UCCPT"]
+
+
+def test_a_word_only_alert_has_no_block_button(db, sent):
+    assert run(_process("golden code?", [("golden", "text")]))
+    rows = sent[0]["reply_markup"]["inline_keyboard"]
+    assert not [b for r in rows for b in r if b.get("callback_data", "").startswith("rcblk:")]
+
+
+def test_a_blocked_code_stops_alerting_end_to_end(db, sent):
+    """The real case: 10LVL out of "6-10LVL FaceIT", from the official channel."""
+    post = (
+        "🚨 KeyDrop 2V2 TOURNAMENTS are HERE!\n\n"
+        "We are launching a tournament for 6-10LVL FaceIT."
+    )
+
+    async def scenario():
+        from src.db.radar import block_code
+
+        chat_row, kw_rows, linked = await _setup([("code:5", "code")])
+
+        async def process(msg_id):
+            return await handlers.process_radar_message(
+                _message(post, msg_id), chat_row, keywords=kw_rows, linked_kw_ids=linked
+            )
+
+        assert await process(1) is True
+        assert "10LVL" in sent[0]["text"]
+
+        await block_code("10LVL")
+        assert await process(2) is False
+
+    run(scenario())
+    assert len(sent) == 1
