@@ -12,6 +12,7 @@ from src.bot.handlers.radar_common import (
     _radar_main_kb,
     _render_chats,
     _render_keywords,
+    _short_ts,
 )
 from src.bot.handlers.radar_filters import register_filters, render_quiet_hub
 from src.bot.handlers.radar_keywords import (
@@ -29,13 +30,19 @@ from src.db.radar import (
     get_recent_radar_alerts,
     get_silent_radar_chats,
 )
+from src.radar.matcher import keyword_display
 
 _SILENT_THRESHOLD_HOURS = 120
-_STATUS_MARK = {"muted": " 🔇", "failed": " ⚠️ not delivered"}
+_STATUS_MARK = {"muted": " 🔇", "failed": " ⚠️"}
 
 log = logging.getLogger(__name__)
 
 _start_time = datetime.now(timezone.utc)
+
+_MAIN_TEXT = (
+    "🔍 <b>Radar</b>\n"
+    "<i>Real-time keyword alerts from the chats you watch.</i>"
+)
 
 _RADAR_INPUT_HANDLERS = {
     "add_radar_keyword": handle_keyword_input,
@@ -55,31 +62,35 @@ async def _render_status() -> str:
 
     alert_lines = ""
     if alerts:
-        alert_lines = "\n\n<b>Last alerts:</b>\n" + "\n".join(
-            f"• \"{escape(r['keyword'])}\" in {escape(r['chat_ref'])} — {r['alerted_at'][:16]}"
+        alert_lines = "\n\n🔔 <b>Last alerts</b>\n" + "\n".join(
+            f"• <b>{escape(keyword_display(r['keyword']))}</b> · "
+            f"{escape(r['chat_ref'])} — {_short_ts(r['alerted_at'])}"
             f"{_STATUS_MARK.get(r['status'], '')}"
             for r in alerts
         )
 
     pending = await count_pending_alerts()
-    pending_line = f"\nAwaiting resend: <b>{pending}</b>" if pending else ""
+    pending_line = f"\n⚠️ Awaiting resend: <b>{pending}</b>" if pending else ""
 
     repeats = await count_repeat_codes()
-    codes_line = f"\nRepeat codes silenced: <b>{repeats}</b>" if repeats else ""
+    codes_line = f"\n🔑 Repeat codes silenced: <b>{repeats}</b>" if repeats else ""
 
     quiet_lines = ""
     silent = await get_silent_radar_chats(_SILENT_THRESHOLD_HOURS)
     if silent:
-        quiet_lines = f"\n\n<b>Quiet chats (>{_SILENT_THRESHOLD_HOURS}h):</b>\n" + "\n".join(
-            f"• {escape(r['title'] or r['chat_ref'])} — {r['hours_silent']}h"
-            for r in silent
+        quiet_lines = (
+            f"\n\n💤 <b>Quiet chats</b> <i>(over {_SILENT_THRESHOLD_HOURS}h)</i>\n"
+            + "\n".join(
+                f"• {escape(r['title'] or r['chat_ref'])} — {r['hours_silent']}h"
+                for r in silent
+            )
         )
 
     text = (
-        f"📊 <b>Radar Status</b>\n\n"
-        f"Chats monitored: <b>{len(chats)}</b>\n"
-        f"Keywords active: <b>{len(keywords)}</b>\n"
-        f"Uptime: <b>{hours}h {minutes}m</b>"
+        f"📊 <b>Radar status</b>\n\n"
+        f"💬 Chats monitored: <b>{len(chats)}</b>\n"
+        f"📋 Keywords active: <b>{len(keywords)}</b>\n"
+        f"⏱ Uptime: <b>{hours}h {minutes}m</b>"
         f"{pending_line}"
         f"{codes_line}"
         f"{alert_lines}"
@@ -95,18 +106,12 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message((pf.command("radar") | pf.command("start")) & admin_msg)
     async def cmd_radar(_, message: Message) -> None:
-        await message.reply(
-            "🔍 <b>Radar</b> — real-time keyword alerts",
-            reply_markup=_radar_main_kb(),
-        )
+        await message.reply(_MAIN_TEXT, reply_markup=await _radar_main_kb())
 
     @bot.on_callback_query(pf.regex(r"^radar_main$") & admin_cb)
     async def cb_radar_main(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)
-        await query.message.edit_text(
-            "🔍 <b>Radar</b> — real-time keyword alerts",
-            reply_markup=_radar_main_kb(),
-        )
+        await query.message.edit_text(_MAIN_TEXT, reply_markup=await _radar_main_kb())
 
     @bot.on_callback_query(pf.regex(r"^radar_status$") & admin_cb)
     async def cb_radar_status(_, query: CallbackQuery) -> None:

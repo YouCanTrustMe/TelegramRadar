@@ -34,6 +34,7 @@ from src.db.radar import (
     set_keyword_chat_mode,
     unblock_code,
 )
+from src.bot.handlers.radar_common import _clip, _plural, _short_ts
 from src.radar.matcher import keyword_display
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ _RULES_PER_PAGE = 8
 _SENDERS_PER_PAGE = 8
 _BLOCKED_CODES_LIMIT = 30
 
-_ACTION_TITLE = {"mute": ("🚫", "Muted senders"), "allow": ("✅", "Allowed senders")}
+_ACTION_TITLE = {"mute": ("🔇", "Muted senders"), "allow": ("✅", "Allowed senders")}
 
 
 def _action_target(cd: str | None) -> tuple[int, int, int] | None:
@@ -99,16 +100,27 @@ async def _replace_button(query: CallbackQuery, callback_data: str, text: str) -
 async def _render_muted() -> str:
     rows = await get_muted_alerts(_MUTED_VIEW_LIMIT)
     if not rows:
-        return "🔇 <b>Quiet log</b>\n\nNothing muted yet."
+        return (
+            "📋 <b>Suppressed matches</b>\n\nNothing muted yet.\n\n"
+            "<i>Matches hidden by a sender filter land here instead of pinging you.</i>"
+        )
     lines = []
     for r in rows:
         who = escape(r["author_name"]) if r["author_name"] else str(r["author_id"])
-        link = f' <a href="{escape(r["message_url"])}">🔗</a>' if r["message_url"] else ""
-        lines.append(
-            f"• <b>{escape(r['keyword'])}</b> in {escape(r['chat_ref'])} — "
-            f"{who} — {r['alerted_at'][:16]}{link}"
+        # The whole keyword×chat phrase is the link, not a trailing 🔗: a one-emoji
+        # tap target is a miss waiting to happen on a phone.
+        head = (
+            f"<b>{escape(keyword_display(r['keyword']))}</b> · "
+            f"{escape(r['chat_ref'])}"
         )
-    return f"🔇 <b>Quiet log</b> (last {len(rows)} muted)\n\n" + "\n".join(lines)
+        if r["message_url"]:
+            head = f'<a href="{escape(r["message_url"])}">{head}</a>'
+        lines.append(f"{head}\n   ↳ {who} · {_short_ts(r['alerted_at'])}")
+    return (
+        f"📋 <b>Suppressed matches</b> · last {len(rows)}\n\n"
+        + "\n\n".join(lines)
+        + "\n\n<i>Tap a line to open the message it was hidden from.</i>"
+    )
 
 
 async def render_quiet_hub() -> tuple[str, InlineKeyboardMarkup]:
@@ -118,16 +130,17 @@ async def render_quiet_hub() -> tuple[str, InlineKeyboardMarkup]:
     senders = len(await get_sender_rule_summary("mute"))
     codes = len(await get_blocked_codes())
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📋 Suppressed matches ({muted})", callback_data="radar_muted")],
-        [InlineKeyboardButton(f"🚫 Muted senders ({senders})", callback_data="rms:mute:0")],
-        [InlineKeyboardButton(f"🔑 Blocked codes ({codes})", callback_data="rcblocked")],
-        [InlineKeyboardButton("◀ Back", callback_data="radar_main")],
+        [InlineKeyboardButton(f"📋 Suppressed matches · {muted}", callback_data="radar_muted")],
+        [InlineKeyboardButton(f"🔇 Muted senders · {senders}", callback_data="rms:mute:0")],
+        [InlineKeyboardButton(f"🚫 Blocked codes · {codes}", callback_data="rcblocked")],
+        [InlineKeyboardButton("« Back", callback_data="radar_main")],
     ])
     text = (
-        "🔇 <b>Quiet</b> — what the radar is holding back\n\n"
-        "📋 matches hidden by a sender filter\n"
-        "🚫 senders muted for a keyword\n"
-        "🔑 tokens that looked like a code but were not"
+        "🔇 <b>Quiet</b>\n"
+        "<i>What the radar is holding back.</i>\n\n"
+        "📋 <b>Suppressed matches</b> — hidden by a sender filter\n"
+        "🔇 <b>Muted senders</b> — silenced for a keyword\n"
+        "🚫 <b>Blocked codes</b> — tokens that only looked like a code"
     )
     return text, kb
 
@@ -136,17 +149,17 @@ async def _render_blocked_codes() -> tuple[str, InlineKeyboardMarkup]:
     rows = await get_blocked_codes()
     buttons = [
         [
-            InlineKeyboardButton(f"🚫 {r['code']}", callback_data="noop"),
+            InlineKeyboardButton(f"🔑 {r['code']}", callback_data="noop"),
             InlineKeyboardButton("❌", callback_data=f"rcunblk:{r['code']}"),
         ]
         for r in rows[:_BLOCKED_CODES_LIMIT]
     ]
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_quiet")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data="radar_quiet")])
     if rows:
         text = (
-            f"🚫 <b>Blocked codes</b> ({len(rows)})\n\n"
-            f"Tokens that look like a code but never were. They never alert again.\n"
-            f"❌ removes the block."
+            f"🚫 <b>Blocked codes</b> · {len(rows)}\n\n"
+            f"Tokens that look like a code but never were — they never alert again.\n\n"
+            f"<i>❌ removes the block.</i>"
         )
     else:
         text = (
@@ -173,14 +186,22 @@ async def _render_filter_keywords(chat_id: int) -> tuple[str, InlineKeyboardMark
     keywords = [k for k in await get_radar_keywords() if k["id"] in linked]
     title = escape(chat_row["title"] or chat_row["chat_ref"])
     buttons = [
-        [InlineKeyboardButton(keyword_display(k["keyword"]), callback_data=f"rf_view:{chat_id}:{k['id']}")]
+        [InlineKeyboardButton(
+            f"⚙️ {keyword_display(k['keyword'])}", callback_data=f"rf_view:{chat_id}:{k['id']}"
+        )]
         for k in keywords
     ]
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data=f"radar_chat_view:{chat_id}")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=f"radar_chat_view:{chat_id}")])
     if keywords:
-        text = f"⚙️ <b>Sender filters</b> — {title}\n\nPick a keyword to configure who alerts."
+        text = (
+            f"⚙️ <b>Sender filters</b>\n💬 {title}\n\n"
+            f"<i>Pick a keyword to choose who may alert with it here.</i>"
+        )
     else:
-        text = f"⚙️ <b>Sender filters</b> — {title}\n\n⚠️ No keywords linked to this chat yet."
+        text = (
+            f"⚙️ <b>Sender filters</b>\n💬 {title}\n\n"
+            f"⚠️ No keywords linked to this chat yet."
+        )
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -197,11 +218,17 @@ async def _render_filter_editor(chat_id: int, kw_id: int, page: int = 0) -> tupl
     page = max(0, min(page, total_pages - 1))
     page_rules = rules[page * _RULES_PER_PAGE:(page + 1) * _RULES_PER_PAGE]
 
-    all_mark = "✅ " if mode == "all" else ""
-    allow_mark = "✅ " if mode == "allowlist" else ""
+    # A radio pair reads as a choice; a lone ✅ on the active one reads as a
+    # button that does something.
     buttons = [[
-        InlineKeyboardButton(f"{all_mark}Everyone", callback_data=f"rf_mode:{chat_id}:{kw_id}:all"),
-        InlineKeyboardButton(f"{allow_mark}Allowlist", callback_data=f"rf_mode:{chat_id}:{kw_id}:allowlist"),
+        InlineKeyboardButton(
+            f"{'🔘' if mode == 'all' else '⚪'} Everyone",
+            callback_data=f"rf_mode:{chat_id}:{kw_id}:all",
+        ),
+        InlineKeyboardButton(
+            f"{'🔘' if mode == 'allowlist' else '⚪'} Allowlist",
+            callback_data=f"rf_mode:{chat_id}:{kw_id}:allowlist",
+        ),
     ]]
     for r in page_rules:
         icon = "✅" if r["action"] == "allow" else "🔇"
@@ -213,16 +240,16 @@ async def _render_filter_editor(chat_id: int, kw_id: int, page: int = 0) -> tupl
     if total_pages > 1:
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("◀", callback_data=f"rf_view:{chat_id}:{kw_id}:{page - 1}"))
+            nav.append(InlineKeyboardButton("‹", callback_data=f"rf_view:{chat_id}:{kw_id}:{page - 1}"))
         nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton("▶", callback_data=f"rf_view:{chat_id}:{kw_id}:{page + 1}"))
+            nav.append(InlineKeyboardButton("›", callback_data=f"rf_view:{chat_id}:{kw_id}:{page + 1}"))
         buttons.append(nav)
     buttons.append([
         InlineKeyboardButton("🛡 Add admins", callback_data=f"rf_admins:{chat_id}:{kw_id}"),
         InlineKeyboardButton("📋 Last 10", callback_data=f"rf_last10:{chat_id}:{kw_id}"),
     ])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data=f"rf_chat:{chat_id}")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=f"rf_chat:{chat_id}")])
 
     mode_desc = (
         "alert from <b>everyone</b> except muted senders"
@@ -236,9 +263,10 @@ async def _render_filter_editor(chat_id: int, kw_id: int, page: int = 0) -> tupl
             "Add a sender below, or switch back to Everyone."
         )
     text = (
-        f"⚙️ Filter: <b>{escape(keyword_display(kw_row['keyword']))}</b> in {chat_disp}\n"
+        f"⚙️ <b>{escape(keyword_display(kw_row['keyword']))}</b>\n"
+        f"💬 {chat_disp}\n\n"
         f"Mode: {mode_desc}.{warning}\n\n"
-        f"{'Senders:' if rules else 'No sender rules yet.'}"
+        f"{'<b>Sender rules</b>' if rules else '<i>No sender rules yet.</i>'}"
     )
     return text, InlineKeyboardMarkup(buttons)
 
@@ -251,22 +279,34 @@ async def _render_last10(chat_id: int, kw_id: int) -> tuple[str, InlineKeyboardM
     senders = await get_recent_trigger_senders(
         kw_row["keyword"], chat_id, _RECENT_SENDERS_LIMIT
     )
+    kw_disp = escape(keyword_display(kw_row["keyword"]))
+    chat_disp = escape(chat_row["title"] or chat_row["chat_ref"])
     buttons = []
     for s in senders:
         who = s["author_name"] or str(s["author_id"])
+        label = _clip(f"👤 {who} · {s['cnt']}×")
+        # The name opens their last message, as it does on the keyword-wide
+        # senders screen: deciding whether to mute someone means reading what
+        # they actually wrote.
         buttons.append([
-            InlineKeyboardButton(f"{who} ({s['cnt']}×)", callback_data="noop"),
+            InlineKeyboardButton(label, url=s["last_url"])
+            if s["last_url"]
+            else InlineKeyboardButton(label, callback_data="noop"),
             InlineKeyboardButton("✅", callback_data=f"rf_add:{chat_id}:{kw_id}:{s['author_id']}:allow"),
             InlineKeyboardButton("🔇", callback_data=f"rf_add:{chat_id}:{kw_id}:{s['author_id']}:mute"),
         ])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data=f"rf_view:{chat_id}:{kw_id}")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=f"rf_view:{chat_id}:{kw_id}")])
     if senders:
         text = (
-            f"📋 Recent senders of <b>{escape(kw_row['keyword'])}</b>\n\n"
-            f"✅ = allow (only-list) · 🔇 = mute"
+            f"👥 <b>Recent senders</b> · {kw_disp}\n💬 {chat_disp}\n\n"
+            f"<i>Tap a name to open their message · ✅ alert only from them · "
+            f"🔇 mute them for this keyword.</i>"
         )
     else:
-        text = f"📋 No recorded senders for <b>{escape(kw_row['keyword'])}</b> yet."
+        text = (
+            f"👥 <b>Recent senders</b> · {kw_disp}\n💬 {chat_disp}\n\n"
+            f"Nobody has tripped it here yet."
+        )
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -285,7 +325,7 @@ async def _render_keyword_senders(kw_id: int) -> tuple[str, InlineKeyboardMarkup
         who = sdr["author_name"] or str(sdr["author_id"])
         where = sdr["chat_title"] or sdr["chat_ref"] or "?"
         state = {"mute": "🔇 ", "allow": "✅ "}.get(sdr["action"], "")
-        label = f"{state}{who} · {where} ({sdr['cnt']}×)"[:48]
+        label = _clip(f"{state}{who} · {where} · {sdr['cnt']}×")
         row = [
             InlineKeyboardButton(label, url=sdr["last_url"])
             if sdr["last_url"]
@@ -297,15 +337,18 @@ async def _render_keyword_senders(kw_id: int) -> tuple[str, InlineKeyboardMarkup
         if sdr["action"] != "allow":
             row.append(InlineKeyboardButton("✅", callback_data=f"rk_add:{target}:allow"))
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data=f"radar_kw_view:{kw_id}")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=f"radar_kw_view:{kw_id}")])
+    kw_disp = escape(keyword_display(kw_row["keyword"]))
     if senders:
         text = (
-            f"👥 <b>{escape(kw_row['keyword'])}</b> — last {len(senders)} sender(s)\n\n"
-            f"Tap a name to open their message · 🔇 mute them for this word · "
-            f"✅ alert only from them."
+            f"👥 <b>Recent senders</b> · {kw_disp}\n"
+            f"<i>Across every chat this keyword watches — last {len(senders)}.</i>\n\n"
+            f"<i>Tap a name to open their message · 🔇 mute · ✅ alert only from them.</i>"
         )
     else:
-        text = f"👥 Nobody has tripped <b>{escape(kw_row['keyword'])}</b> yet."
+        text = (
+            f"👥 <b>Recent senders</b> · {kw_disp}\n\nNobody has tripped it yet."
+        )
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -322,7 +365,7 @@ async def _render_sender_list(action: str, page: int) -> tuple[str, InlineKeyboa
         who = r["label"] or str(r["sender_id"])
         buttons.append([
             InlineKeyboardButton(
-                f"{icon} {who} · {r['cnt']} rule(s)",
+                _clip(f"{icon} {who} · {_plural(r['cnt'], 'rule')}"),
                 callback_data=f"rms_view:{r['sender_id']}",
             ),
             InlineKeyboardButton("❌", callback_data=f"rms_clear:{r['sender_id']}:{action}:{page}"),
@@ -330,22 +373,22 @@ async def _render_sender_list(action: str, page: int) -> tuple[str, InlineKeyboa
     if total_pages > 1:
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("◀", callback_data=f"rms:{action}:{page - 1}"))
+            nav.append(InlineKeyboardButton("‹", callback_data=f"rms:{action}:{page - 1}"))
         nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton("▶", callback_data=f"rms:{action}:{page + 1}"))
+            nav.append(InlineKeyboardButton("›", callback_data=f"rms:{action}:{page + 1}"))
         buttons.append(nav)
     other = "allow" if action == "mute" else "mute"
     other_icon, other_title = _ACTION_TITLE[other]
     buttons.append([InlineKeyboardButton(f"{other_icon} {other_title}", callback_data=f"rms:{other}:0")])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_quiet")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data="radar_quiet")])
 
     if rows:
         text = (
-            f"{icon} <b>{title}</b> — {len(rows)} sender(s), "
-            f"{sum(r['cnt'] for r in rows)} rule(s)\n\n"
-            f"Tap a name to see and edit their rules · ❌ clears every "
-            f"{'mute' if action == 'mute' else 'allow'} for them at once."
+            f"{icon} <b>{title}</b> · {_plural(len(rows), 'sender')} · "
+            f"{_plural(sum(r['cnt'] for r in rows), 'rule')}\n\n"
+            f"<i>Tap a name to see and edit their rules · ❌ clears every "
+            f"{'mute' if action == 'mute' else 'allow'} for them at once.</i>"
         )
     else:
         text = f"{icon} <b>{title}</b>\n\nNothing here yet."
@@ -362,13 +405,16 @@ async def _render_sender_detail(sender_id: int) -> tuple[str, InlineKeyboardMark
         icon = "✅" if r["action"] == "allow" else "🔇"
         where = r["chat_title"] or r["chat_ref"]
         buttons.append([
-            InlineKeyboardButton(f"{icon} {keyword_display(r['keyword'])} · {where}", callback_data="noop"),
+            InlineKeyboardButton(
+                _clip(f"{icon} {keyword_display(r['keyword'])} · {where}"), callback_data="noop"
+            ),
             InlineKeyboardButton("❌", callback_data=f"rms_del:{r['id']}:{sender_id}"),
         ])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="rms:mute:0")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data="rms:mute:0")])
     text = (
-        f"👤 <b>{escape(who)}</b> · id <code>{sender_id}</code>\n\n"
-        f"{len(rules)} rule(s). ❌ removes one."
+        f"👤 <b>{escape(who)}</b>\n"
+        f"id <code>{sender_id}</code> · {_plural(len(rules), 'rule')}\n\n"
+        f"<i>❌ removes one rule.</i>"
     )
     return text, InlineKeyboardMarkup(buttons)
 
@@ -565,8 +611,8 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
             "Radar filter: cleared %d %s rule(s) for sender=%s, allowlists reopened=%d",
             removed, action, sender_s, reopened,
         )
-        note = f", {reopened} keyword(s) back to everyone" if reopened else ""
-        await query.answer(f"Removed {removed} rule(s){note}")
+        note = f", {_plural(reopened, 'keyword')} back to everyone" if reopened else ""
+        await query.answer(f"Removed {_plural(removed, 'rule')}{note}")
         text, kb = await _render_sender_list(action, int(page_s))
         await query.message.edit_text(text, reply_markup=kb)
 
@@ -596,6 +642,6 @@ def register_filters(bot, admin_msg, admin_cb) -> None:
             return
         await set_keyword_chat_mode(kw_id, chat_id, "allowlist")
         log.info("Radar filter: added %d admin(s) to allowlist kw_id=%d chat_id=%d", added, kw_id, chat_id)
-        await query.answer(f"🛡 Added {added} admin(s) to allowlist", show_alert=True)
+        await query.answer(f"🛡 Added {_plural(added, 'admin')} to the allowlist", show_alert=True)
         text, kb = await _render_filter_editor(chat_id, kw_id)
         await query.message.edit_text(text, reply_markup=kb)

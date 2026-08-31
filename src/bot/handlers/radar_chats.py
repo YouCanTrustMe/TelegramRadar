@@ -54,30 +54,26 @@ async def _render_chat_edit(chat_id: int, page: int) -> tuple[str, InlineKeyboar
     if total_pages > 1:
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("◀", callback_data=f"radar_chat_view:{chat_id}:{page - 1}"))
+            nav.append(InlineKeyboardButton("‹", callback_data=f"radar_chat_view:{chat_id}:{page - 1}"))
         nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton("▶", callback_data=f"radar_chat_view:{chat_id}:{page + 1}"))
+            nav.append(InlineKeyboardButton("›", callback_data=f"radar_chat_view:{chat_id}:{page + 1}"))
         buttons.append(nav)
 
     if linked:
         buttons.append([InlineKeyboardButton("⚙️ Sender filters", callback_data=f"rf_chat:{chat_id}")])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="radar_chats:0")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data="radar_chats:0")])
 
     status_line = f" · status: <b>{chat_row['status']}</b>" if chat_row["status"] != "active" else ""
+    head = f"💬 <b>{escape(chat_row['title'] or chat_row['chat_ref'])}</b>{status_line}"
     if keywords:
         text = (
-            f"💬 <b>{escape(chat_row['title'] or chat_row['chat_ref'])}</b>"
-            f"{status_line}\n\n"
-            f"Tap a keyword to toggle monitoring for this chat.\n"
-            f"Linked: <b>{len(linked)}</b>/{total}"
+            f"{head}\n"
+            f"<i>Linked keywords: {len(linked)} of {total}.</i>\n\n"
+            f"<i>Tap a keyword to watch it here (✅) or stop (⬜).</i>"
         )
     else:
-        text = (
-            f"💬 <b>{escape(chat_row['title'] or chat_row['chat_ref'])}</b>"
-            f"{status_line}\n\n"
-            f"⚠️ No keywords defined yet. Add some in Keywords first."
-        )
+        text = f"{head}\n\n⚠️ No keywords defined yet — add some under 📋 Keywords first."
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -118,8 +114,11 @@ def register_chats(bot, admin_msg, admin_cb) -> None:
         uid = query.from_user.id
         _pending[uid] = {"action": "add_radar_chat", "step": 0, "data": {}}
         await query.message.edit_text(
-            "Send a chat or channel: @username, chat_id, public t.me link, "
-            "or a private +invite link:",
+            "➕ <b>New chat</b>\n\nSend one of:\n"
+            "• <code>@username</code>\n"
+            "• a numeric <code>chat_id</code>\n"
+            "• a public <code>t.me/…</code> link\n"
+            "• a private <code>t.me/+…</code> invite link",
             reply_markup=_back_kb("radar_chats:0"),
         )
 
@@ -130,8 +129,8 @@ def register_chats(bot, admin_msg, admin_cb) -> None:
         chat_row = next((c for c in all_chats if c["id"] == entry_id), None)
         label = _chat_label(chat_row) if chat_row else str(entry_id)
         await query.message.edit_text(
-            f"Remove monitored chat <b>{escape(label)}</b>?\n"
-            f"<i>Userbot will leave the chat.</i>",
+            f"🗑 Remove monitored chat <b>{escape(label)}</b>?\n\n"
+            f"<i>The userbot will leave it, and its keyword links go too.</i>",
             reply_markup=_confirm_keyboard(f"radar_chat_del_ok:{entry_id}", "radar_chats:0"),
         )
 
@@ -178,16 +177,18 @@ async def handle_chat_input(message: Message, uid: int, text: str) -> None:
             log.info("Radar: joined private chat via invite link, id=%s", resolved_id)
         except Exception as exc:
             await message.reply(
-                f"Could not join via invite link: <code>{escape(str(exc))}</code>\n"
-                "If you are already a member, add it by chat_id instead.",
+                f"⚠️ <b>Could not join via invite link.</b>\n"
+                f"<code>{escape(str(exc))}</code>\n\n"
+                "<i>If you are already a member, add it by chat_id instead.</i>",
                 reply_markup=_back_kb("radar_chats:0"),
             )
             return
     else:
         if not (raw.startswith("@") or raw.lstrip("-").isdigit()):
             await message.reply(
-                "Invalid input. Send @username, chat_id, or a t.me link "
-                "(public @name or private +invite):",
+                "⚠️ <b>Not a chat reference.</b>\n\n"
+                "Send <code>@username</code>, a numeric <code>chat_id</code>, "
+                "or a <code>t.me/…</code> link (public or <code>+invite</code>).",
                 reply_markup=_back_kb("radar_chats:0"),
             )
             return
@@ -214,12 +215,16 @@ async def handle_chat_input(message: Message, uid: int, text: str) -> None:
     if added:
         log.info("Radar chat added: ref=%s title=%s", ref, title)
         header = (
-            f"✅ Added: <code>{escape(ref)}</code>"
+            f"✅ <b>Added</b> · <code>{escape(ref)}</code>"
             + (f" — {escape(title)}" if title else "")
-            + f"\n\n💬 <b>Monitored chats</b> ({len(items)})"
+            + f"\n\n💬 <b>Chats</b> · {len(items)}\n"
+            + "<i>Now link keywords to it: tap it below.</i>"
         )
     else:
-        header = f"⚠️ Already monitored: <code>{escape(ref)}</code>"
+        header = (
+            f"⚠️ <b>Already monitored</b> · <code>{escape(ref)}</code>\n\n"
+            f"💬 <b>Chats</b> · {len(items)}"
+        )
     await message.reply(
         header,
         reply_markup=_radar_list_kb(

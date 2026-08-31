@@ -196,35 +196,53 @@ async def process_radar_message(
             if code not in passing_codes:
                 passing_codes.append(code)
 
+    # The title line is what a notification preview shows, so the match itself
+    # goes first and unadorned; a single hit needs no blockquote around it.
     header = ""
     if passing_words:
-        kw_label = "Keyword" if len(passing_words) == 1 else "Keywords"
-        kw_str = ", ".join(escape(kw) for kw in passing_words)
-        header += f"🔍 {kw_label}:\n<blockquote>{kw_str}</blockquote>\n"
+        kw_str = " · ".join(escape(kw) for kw in passing_words)
+        header += (
+            f"🔍 <b>{kw_str}</b>\n"
+            if len(passing_words) == 1
+            else f"🔍 <b>Keywords</b>\n<blockquote>{kw_str}</blockquote>\n"
+        )
     if passing_codes:
-        code_label = "Code" if len(passing_codes) == 1 else "Codes"
         # <code> renders tap-to-copy in Telegram, which is the whole point of
         # catching these: the code is meant to be pasted, not read.
         codes_str = "\n".join(f"<code>{escape(c)}</code>" for c in passing_codes)
-        header += f"🔑 {code_label}:\n<blockquote>{codes_str}</blockquote>\n"
+        header += (
+            f"🔑 {codes_str}\n"
+            if len(passing_codes) == 1
+            else f"🔑 <b>Codes</b>\n<blockquote>{codes_str}</blockquote>\n"
+        )
 
     alert_body = (
-        f"{header}"
-        f"💬 Chat: {chat_disp}\n"
-        f"👤 From: {from_str}\n"
-        f"⏱️ {ts}\n"
+        f"{header}\n"
+        f"💬 {chat_disp}\n"
+        f"👤 {from_str}\n"
+        f"🕒 {ts}\n"
         f"<blockquote expandable>{escape(short_text)}</blockquote>"
     )
     keyboard = [[{"text": "🔗 Open message", "url": msg_link}]]
     if sender_id is not None:
+        # With one keyword the word is already in the message, so the buttons say
+        # what they do instead of repeating it; with several the rows are only
+        # tellable apart by the keyword, so it comes back.
+        single = len(passing) == 1
         for kw in passing:
             kw_id = kw_id_by_text.get(kw)
             if kw_id is None:
                 continue
-            label = keyword_display(kw)
+            suffix = "" if single else f" · {keyword_display(kw)}"
             keyboard.append([
-                {"text": f"🔇 {btn_sender} · {label}", "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}"},
-                {"text": f"✅👤 {btn_sender} · {label}", "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}"},
+                {
+                    "text": f"🔇 Mute {btn_sender}{suffix}"[:40],
+                    "callback_data": f"rmute:{kw_id}:{chat_db_id}:{sender_id}",
+                },
+                {
+                    "text": f"✅ Only {btn_sender}{suffix}"[:40],
+                    "callback_data": f"ronly:{kw_id}:{chat_db_id}:{sender_id}",
+                },
             ])
     # A shape heuristic cannot tell "10LVL" out of "6-10LVL FaceIT" from a real
     # five-character code, and muting the sender is wrong here — the channel that

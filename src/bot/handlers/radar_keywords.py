@@ -6,7 +6,13 @@ from html import escape
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from src.bot.handlers.radar_common import _chat_label, _kw_label, _radar_list_kb, _render_keywords
+from src.bot.handlers.radar_common import (
+    _chat_label,
+    _kw_label,
+    _plural,
+    _radar_list_kb,
+    _render_keywords,
+)
 from src.bot.keyboards import _back_kb, _confirm_keyboard
 from src.bot.state import _pending
 from src.db.radar import (
@@ -16,7 +22,12 @@ from src.db.radar import (
     get_recent_senders_for_keyword,
     remove_radar_keyword,
 )
-from src.radar.matcher import format_code_spec, infer_code_lengths, parse_code_spec
+from src.radar.matcher import (
+    format_code_spec,
+    infer_code_lengths,
+    keyword_display,
+    parse_code_spec,
+)
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +47,7 @@ def _kw_view_kb(kw_id: int, has_history: bool):
     rows = []
     if has_history:
         rows.append([InlineKeyboardButton("👥 Recent senders", callback_data=f"rk_senders:{kw_id}")])
-    rows.append([InlineKeyboardButton("◀ Back", callback_data="radar_keywords:0")])
+    rows.append([InlineKeyboardButton("« Back", callback_data="radar_keywords:0")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -63,18 +74,19 @@ def register_keywords(bot, admin_msg, admin_cb) -> None:
         if linked_chats:
             chat_lines = "\n".join(f"• {escape(_chat_label(c))}" for c in linked_chats)
             text = (
-                f"📋 <b>{escape(kw_row['keyword'])}</b>\n\n"
-                f"Linked to <b>{len(linked_chats)}</b> chat(s):\n{chat_lines}\n\n"
-                f"<i>Edit links from the chat side: Chats → tap chat → toggle keywords.</i>"
+                f"📋 <b>{escape(keyword_display(kw_row['keyword']))}</b>\n"
+                f"<i>Watched in {_plural(len(linked_chats), 'chat')}.</i>\n\n"
+                f"{chat_lines}\n\n"
+                f"<i>Edit links from the chat side: 💬 Chats → tap a chat.</i>"
             )
         else:
             text = (
-                f"📋 <b>{escape(kw_row['keyword'])}</b>\n\n"
+                f"📋 <b>{escape(keyword_display(kw_row['keyword']))}</b>\n\n"
                 f"⚠️ Not linked to any chat yet.\n\n"
-                f"<i>Open Chats → tap a chat → toggle this keyword on.</i>"
+                f"<i>Open 💬 Chats → tap a chat → toggle this keyword on.</i>"
             )
         if senders:
-            text += f"\n\n👥 <b>{len(senders)}</b> recent sender(s) tripped it."
+            text += f"\n👥 {_plural(len(senders), 'recent sender')} tripped it."
         await query.message.edit_text(text, reply_markup=_kw_view_kb(kw_id, bool(senders)))
 
     @bot.on_callback_query(pf.regex(r"^radar_code_add$") & admin_cb)
@@ -87,7 +99,8 @@ def register_keywords(bot, admin_msg, admin_cb) -> None:
         uid = query.from_user.id
         _pending[uid] = {"action": "add_radar_keyword", "step": 0, "data": {}}
         await query.message.edit_text(
-            "Send keyword to add:",
+            "➕ <b>New keyword</b>\n\nSend the word or phrase to watch for.\n\n"
+            "<i>Case and light obfuscation are handled for you.</i>",
             reply_markup=_back_kb("radar_keywords:0"),
         )
 
@@ -98,7 +111,8 @@ def register_keywords(bot, admin_msg, admin_cb) -> None:
         kw_row = next((k for k in items if k["id"] == kw_id), None)
         label = kw_row["keyword"] if kw_row else str(kw_id)
         await query.message.edit_text(
-            f"Remove keyword <b>{escape(label)}</b>?",
+            f"🗑 Remove keyword <b>{escape(keyword_display(label))}</b>?\n\n"
+            f"<i>Its links and sender rules go with it.</i>",
             reply_markup=_confirm_keyboard(f"radar_kw_del_ok:{kw_id}", "radar_keywords:0"),
         )
 
@@ -128,8 +142,8 @@ async def handle_code_input(message: Message, uid: int, text: str) -> None:
     if not lengths:
         _pending.pop(uid, None)
         await message.reply(
-            f"⚠️ Could not read <code>{escape(text)}</code>.\n\n"
-            f"Send a length (<code>5</code>, <code>5,10,17</code>, <code>16-18</code>) "
+            f"⚠️ <b>Could not read</b> <code>{escape(text)}</code>\n\n"
+            f"Send a length — <code>5</code>, <code>5,10,17</code>, <code>16-18</code> — "
             f"or paste a few example codes.",
             reply_markup=_back_kb("radar_keywords:0"),
         )
@@ -159,12 +173,18 @@ async def _add_keyword(
             measured_from = " measured from your examples" if measured else ""
             note = (
                 f"\nWatching for uppercase codes of "
-                f"{', '.join(str(n) for n in lengths)} character(s){measured_from}.\n"
-                f"<i>Link it to a chat under 🎯 Watchlist to start.</i>"
+                f"{', '.join(str(n) for n in lengths)} characters{measured_from}.\n"
+                f"<i>Link it to a chat under 💬 Chats to start.</i>"
             )
-        header = f"✅ Added: <code>{escape(keyword)}</code>{note}\n\n📋 <b>Keywords</b> ({len(items)})"
+        header = (
+            f"✅ <b>Added</b> · <code>{escape(keyword)}</code>{note}\n\n"
+            f"📋 <b>Keywords</b> · {len(items)}"
+        )
     else:
-        header = f"⚠️ Already exists: <code>{escape(keyword)}</code>\n\n📋 <b>Keywords</b> ({len(items)})"
+        header = (
+            f"⚠️ <b>Already exists</b> · <code>{escape(keyword)}</code>\n\n"
+            f"📋 <b>Keywords</b> · {len(items)}"
+        )
 
     kb = _radar_list_kb(
         items, 0, "id", "radar_kw_del:", "radar_kw_add",

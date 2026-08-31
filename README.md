@@ -22,7 +22,7 @@ own Telegram account and bot token, against its own database.
 - A daily verify job heals renamed/missing chats and warns on lost membership
 
 All configuration is done through the bot UI: `/radar` opens the menu
-(Keywords · Watchlist · Quiet log · Muted senders · Status).
+(Keywords · Chats · Quiet · Status).
 
 ## Architecture
 
@@ -59,7 +59,7 @@ python main.py
 ```
 
 The radar account must be a member of every watched chat. Adding a chat through
-the bot (`/radar` → Watchlist → Add) makes the userbot join it automatically;
+the bot (`/radar` → Chats → Add) makes the userbot join it automatically;
 chats imported from the migration script must be joined by that account.
 
 ## Docker

@@ -89,7 +89,7 @@ def test_a_code_alerts_and_is_shown_tap_to_copy(db, sent):
     assert run(_process("GOLDEN CODE - LVR41ED9DUH0UCCPT", [("code:17", "code")]))
     body = sent[0]["text"]
     assert "<code>LVR41ED9DUH0UCCPT</code>" in body
-    assert "🔑 Code:" in body
+    assert "🔑 <code>LVR41ED9DUH0UCCPT</code>" in body
     # The spec itself is bookkeeping, not something to read in an alert.
     assert "code:17" not in body
 
@@ -134,8 +134,8 @@ def test_word_and_code_keywords_appear_in_separate_sections(db, sent):
         "golden code EK6WCVEG2GKMFEJSD", [("golden", "text"), ("code:17", "code")]
     ))
     body = sent[0]["text"]
-    assert "🔍 Keyword:\n<blockquote>golden</blockquote>" in body
-    assert "🔑 Code:\n<blockquote><code>EK6WCVEG2GKMFEJSD</code></blockquote>" in body
+    assert "🔍 <b>golden</b>" in body
+    assert "🔑 <code>EK6WCVEG2GKMFEJSD</code>" in body
 
 
 def test_a_word_only_match_has_no_code_section(db, sent):
