@@ -4,7 +4,12 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.radar import filter_unseen_codes, log_radar_alert, record_seen_codes
+from src.db.radar import (
+    filter_unseen_codes,
+    find_code_variants,
+    log_radar_alert,
+    record_seen_codes,
+)
 from src.dispatcher.sender import SendFailed, send_to
 from src.radar.matcher import find_codes, keyword_display, match_keywords, parse_code_spec
 from src.radar.pending import queue_alert
@@ -81,6 +86,7 @@ async def process_radar_message(
     # is single-use: every sighting is remembered, and one already seen inside the
     # dedup window is counted but never alerted again.
     code_hits: dict[str, list[str]] = {}
+    variant_of: dict[str, str] = {}
     all_codes: list[str] = []
     for row in code_rows:
         found = find_codes(text, parse_code_spec(row["keyword"]))[:_MAX_CODES_PER_MESSAGE]
@@ -90,6 +96,9 @@ async def process_radar_message(
     if all_codes:
         all_codes = list(dict.fromkeys(all_codes))[:_MAX_CODES_PER_MESSAGE]
         unseen = await filter_unseen_codes(all_codes, settings.radar_code_dedup_days)
+        variant_of = await find_code_variants(
+            [c for c in all_codes if c in unseen], settings.radar_code_dedup_days
+        )
         for kw, found in code_hits.items():
             fresh = [c for c in found if c in unseen]
             if fresh:
@@ -209,7 +218,14 @@ async def process_radar_message(
     if passing_codes:
         # <code> renders tap-to-copy in Telegram, which is the whole point of
         # catching these: the code is meant to be pasted, not read.
-        codes_str = "\n".join(f"<code>{escape(c)}</code>" for c in passing_codes)
+        codes_str = "\n".join(
+            f"<code>{escape(c)}</code>"
+            + (
+                f" <i>≈ O/0 variant of</i> <code>{escape(variant_of[c])}</code>"
+                if c in variant_of else ""
+            )
+            for c in passing_codes
+        )
         header += (
             f"🔑 {codes_str}\n"
             if len(passing_codes) == 1
@@ -253,8 +269,16 @@ async def process_radar_message(
             {"text": f"🚫 Not a code · {code}", "callback_data": f"rcblk:{code}"}
         ])
     reply_markup = {"inline_keyboard": keyboard}
+    # Guesses at an O/0 code arrive in bursts right after the first sighting;
+    # they are worth seeing, since only one guess works, but not worth a ring each.
+    silent = not passing_words and all(c in variant_of for c in passing_codes)
     try:
-        await send_to(settings.telegram_admin_id, alert_body, reply_markup=reply_markup)
+        await send_to(
+            settings.telegram_admin_id,
+            alert_body,
+            disable_notification=silent,
+            reply_markup=reply_markup,
+        )
     except SendFailed as exc:
         log_entries = [
             {
@@ -276,9 +300,11 @@ async def process_radar_message(
             kw, chat_ref_str, author_id, text, msg_link, author_name, "sent", chat_db_id
         )
     log.info(
-        "Radar alert sent: keywords=%s chat=%s author_id=%s",
+        "Radar alert sent: keywords=%s chat=%s author_id=%s silent=%s variants=%s",
         passing,
         chat_title,
         author_id,
+        silent,
+        {c: variant_of[c] for c in passing_codes if c in variant_of},
     )
     return True

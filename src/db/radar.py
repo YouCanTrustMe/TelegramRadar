@@ -526,6 +526,32 @@ async def filter_unseen_codes(codes: list[str], days: int) -> set[str]:
     return {c for c in codes if c not in skip}
 
 
+async def find_code_variants(codes: list[str], days: int) -> dict[str, str]:
+    """Map each code to an already-seen one it differs from only by O/0.
+
+    A code read off an image gets retyped with O and 0 swapped, and only one of
+    the guesses works — so a variant is not a repeat to swallow, but it is not a
+    new drop either."""
+    if not codes:
+        return {}
+    placeholders = ",".join("?" * len(codes))
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT code FROM radar_seen_codes WHERE blocked = 0 "
+            "AND last_seen_at >= datetime('now', ?) "
+            f"AND REPLACE(code, 'O', '0') IN ({placeholders}) ORDER BY first_seen_at",
+            (f"-{days} days", *(c.replace("O", "0") for c in codes)),
+        ) as cur:
+            seen = [r["code"] for r in await cur.fetchall()]
+    variants: dict[str, str] = {}
+    for code in codes:
+        for other in seen:
+            if other != code and other.replace("O", "0") == code.replace("O", "0"):
+                variants[code] = other
+                break
+    return variants
+
+
 async def record_seen_codes(codes: list[str], chat_ref: str, message_url: str) -> None:
     """Remember every code sighting, alerted or not, so a repost stays quiet."""
     if not codes:

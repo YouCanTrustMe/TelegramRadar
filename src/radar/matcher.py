@@ -236,10 +236,17 @@ def match_keywords(
 
 CODE_PREFIX = "code:"
 
-# Drop codes are uppercase alphanumeric runs standing on their own: "F3QK5",
+# Drop codes are alphanumeric runs standing on their own: "F3QK5",
 # "XPMR4AZQH5", "EK6WCVEG2GKMFEJSD". The boundary check keeps a code out of a
-# longer word and out of the lowercase hex inside URLs.
-_CODE_TOKEN = re.compile(r"(?<![0-9A-Za-z])([0-9A-Z]{3,40})(?![0-9A-Za-z])")
+# longer word, and out of @usernames ("@Br1ghtdown", "@name_surname404").
+_CODE_TOKEN = re.compile(r"(?<![0-9A-Za-z_@])([0-9A-Za-z]{3,40})(?![0-9A-Za-z_])")
+
+# Codes are published uppercase but retyped in any case: "c272pajwfwdvqxwlt",
+# or "Qsevmfkn2duy4gvpf" after a phone capitalised the first letter. A short
+# lowercase run is ordinary chat ("top10", "gg2ez"), so only a long one with a
+# digit is read case-blind ("hmmmmmmmmmm" is not), and only in those two typed
+# forms — camelCase like "5LVLFaceIT" is a word glued to a number.
+_ANY_CASE_MIN_LEN = 10
 
 # A code is never posted inside a link, but percent-encoding and path segments
 # are full of short uppercase alphanumeric runs ("%202V2%20"), so links are cut
@@ -304,9 +311,8 @@ def infer_code_lengths(text: str) -> list[int]:
     as codes are measured, so surrounding words in a copied message are ignored."""
     lengths: set[int] = set()
     for m in _CODE_TOKEN.finditer(_URL.sub(" ", text)):
-        token = m.group(1)
-        if CODE_MIN_LEN <= len(token) <= CODE_MAX_LEN and _looks_like_code(token):
-            lengths.add(len(token))
+        if _as_code(m.group(1)):
+            lengths.add(len(m.group(1)))
     return sorted(lengths)[:_MAX_CODE_LENGTHS]
 
 
@@ -317,6 +323,20 @@ def keyword_display(keyword: str) -> str:
         return keyword
     lengths = parse_code_spec(keyword)
     return f"🔑{','.join(str(n) for n in lengths)}" if lengths else keyword
+
+
+def _as_code(token: str) -> str | None:
+    """The code a token spells, uppercased, or None if it is not one."""
+    if token != token.upper():
+        rest = token[1:]
+        if (
+            len(token) < _ANY_CASE_MIN_LEN
+            or rest != rest.lower()
+            or not any(c.isdigit() for c in token)
+        ):
+            return None
+        token = token.upper()
+    return token if _looks_like_code(token) else None
 
 
 def _looks_like_code(token: str) -> bool:
@@ -338,8 +358,10 @@ def find_codes(text: str, lengths: list[int]) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
     for m in _CODE_TOKEN.finditer(_URL.sub(" ", text)):
-        token = m.group(1)
-        if len(token) not in wanted or token in seen or not _looks_like_code(token):
+        if len(m.group(1)) not in wanted:
+            continue
+        token = _as_code(m.group(1))
+        if token is None or token in seen:
             continue
         seen.add(token)
         found.append(token)

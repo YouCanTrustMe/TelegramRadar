@@ -10,6 +10,7 @@ from src.db.radar import (
     add_radar_keyword,
     count_repeat_codes,
     filter_unseen_codes,
+    find_code_variants,
     purge_seen_codes,
     record_seen_codes,
 )
@@ -89,8 +90,19 @@ def test_format_round_trips():
         # Links are full of uppercase runs and percent-encoding.
         ("https://faceit.com/x/Keydrop%202V2%20Tournament", [5], []),
         ("t.me/c/1234567890/AB12C", [5, 10], []),
-        # Lowercase is never a code.
+        # A short lowercase run is chat, not a code.
         ("f3qk5 golden code", [5], []),
+        # A long code retyped in lowercase, or phone-capitalised, is still one.
+        ("c272pajwfwdvqxwlt", [17], ["C272PAJWFWDVQXWLT"]),
+        ("Qsevmfkn2duy4gvpf", [17], ["QSEVMFKN2DUY4GVPF"]),
+        # Case-blind reading needs a digit, and no camelCase.
+        ("hmmmmmmmmmmmmmmmm", [17], []),
+        ("1-5LVLFaceIT2", [11], []),
+        # A username is never a code, whatever it looks like.
+        ("▪️ @Br1ghtdown\n▪️ @wishscarlet390", [10, 14], []),
+        ("1. @name_surname404 2. @ABC12", [5, 10], []),
+        ("e0ve6arhretwu0wjy \nE95VRLQMZG4BSJKY6\nGolden Code Keydrop", [5, 17],
+         ["E0VE6ARHRETWU0WJY", "E95VRLQMZG4BSJKY6"]),
     ],
 )
 def test_find_codes(text, lengths, expected):
@@ -99,6 +111,30 @@ def test_find_codes(text, lengths, expected):
 
 def test_find_codes_deduplicates_within_one_message():
     assert find_codes("R6S9A and again R6S9A", [5]) == ["R6S9A"]
+
+
+def test_find_codes_deduplicates_across_case():
+    assert find_codes("C272PAJWFWDVQXWLT c272pajwfwdvqxwlt", [17]) == ["C272PAJWFWDVQXWLT"]
+
+
+def test_an_o_zero_variant_is_linked_to_the_first_guess(db):
+    async def scenario():
+        await record_seen_codes(["F5XPXGQSAH7030GXG"], "@keydropchat", "u1")
+        variants = await find_code_variants(
+            ["F5XPXGQSAH7O3OGXG", "EK6WCVEG2GKMFEJSD"], 7
+        )
+        assert variants == {"F5XPXGQSAH7O3OGXG": "F5XPXGQSAH7030GXG"}
+
+    run(scenario())
+
+
+def test_a_variant_outside_the_window_is_a_new_code(db):
+    async def scenario():
+        await record_seen_codes(["F5XPXGQSAH7030GXG"], "@keydropchat", "u1")
+        await _backdate("F5XPXGQSAH7030GXG", 8)
+        assert await find_code_variants(["F5XPXGQSAH7O3OGXG"], 7) == {}
+
+    run(scenario())
 
 
 def test_find_codes_without_lengths_matches_nothing():
@@ -207,6 +243,7 @@ def test_keyword_kind_is_stored(db):
         # Nothing code-shaped to measure.
         ("hello there friends", []),
         ("f3qk5 r6s9a", []),
+        ("c272pajwfwdvqxwlt", [17]),
         ("", []),
     ],
 )

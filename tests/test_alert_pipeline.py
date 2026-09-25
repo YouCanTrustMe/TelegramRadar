@@ -129,6 +129,28 @@ def test_a_new_code_still_alerts_after_a_repeat(db, sent):
     run(scenario())
 
 
+def test_an_o_zero_variant_arrives_silently_and_marked(db, sent):
+    """People retype an image code guessing O or 0; only one guess works, so each
+    is shown, but only the first rings."""
+    async def scenario():
+        chat_row, kw_rows, linked = await _setup([("code:17", "code")])
+
+        async def process(text, msg_id):
+            return await handlers.process_radar_message(
+                _message(text, msg_id), chat_row, keywords=kw_rows, linked_kw_ids=linked
+            )
+
+        assert await process("F5XPXGQSAH7030GXG", 1) is True
+        assert await process("F5XPXGQSAH7O30GXG", 2) is True
+        assert await process("F5XPXGQSAH7O30GXG", 3) is False
+        assert await process("EK6WCVEG2GKMFEJSD", 4) is True
+
+    run(scenario())
+    assert [c["disable_notification"] for c in sent] == [False, True, False]
+    assert "≈ O/0 variant of</i> <code>F5XPXGQSAH7030GXG</code>" in sent[1]["text"]
+    assert "variant" not in sent[2]["text"]
+
+
 def test_word_and_code_keywords_appear_in_separate_sections(db, sent):
     assert run(_process(
         "golden code EK6WCVEG2GKMFEJSD", [("golden", "text"), ("code:17", "code")]
